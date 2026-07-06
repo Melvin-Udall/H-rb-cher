@@ -2,6 +2,15 @@ name: Hörbuch erstellen
 
 on:
   workflow_dispatch:
+    inputs:
+      quellsprache:
+        description: 'Quellsprache (de oder en)'
+        required: true
+        default: 'de'
+        type: choice
+        options:
+          - de
+          - en
 
 jobs:
   build-audiobook:
@@ -9,6 +18,10 @@ jobs:
     steps:
       - name: Repository auschecken
         uses: actions/checkout@v4
+
+      - name: Python-Pakete installieren
+        run: |
+          pip install ebooklib beautifulsoup4 pymupdf transformers sentencepiece torch --quiet
 
       - name: Piper installieren
         run: |
@@ -18,17 +31,60 @@ jobs:
       - name: Thorsten-High-Stimme herunterladen
         run: |
           mkdir -p voices
-          wget -O voices/de_DE-thorsten-high.onnx https://huggingface.co/Thorsten-Voice/Piper/resolve/main/de_DE-thorsten-high.onnx
-          wget -O voices/de_DE-thorsten-high.onnx.json https://huggingface.co/Thorsten-Voice/Piper/resolve/main/de_DE-thorsten-high.onnx.json
+          wget -O voices/de_DE-thorsten-high.onnx https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx
+          wget -O voices/de_DE-thorsten-high.onnx.json https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx.json
 
-      - name: Text glätten
+      - name: Text extrahieren, übersetzen und glätten
         run: |
           python3 -c "
-          import re
-          with open('text/buch.txt', encoding='utf-8') as f:
-              text = f.read()
+          import os, re, glob
+
+          quellsprache = '${{ github.event.inputs.quellsprache }}'
+
+          dateien = glob.glob('text/buch.*')
+          dateien = [d for d in dateien if not d.endswith('.gitkeep')]
+          pfad = dateien[0]
+          endung = pfad.split('.')[-1].lower()
+
+          text = ''
+          if endung == 'txt':
+              with open(pfad, encoding='utf-8') as f:
+                  text = f.read()
+          elif endung == 'epub':
+              from ebooklib import epub
+              import ebooklib
+              from bs4 import BeautifulSoup
+              book = epub.read_epub(pfad)
+              teile = []
+              for item in book.get_items():
+                  if item.get_type() == ebooklib.ITEM_DOCUMENT:
+                      soup = BeautifulSoup(item.get_content(), 'html.parser')
+                      teile.append(soup.get_text())
+              text = '\n'.join(teile)
+          elif endung == 'pdf':
+              import fitz
+              doc = fitz.open(pfad)
+              teile = [seite.get_text() for seite in doc]
+              text = '\n'.join(teile)
+
           text = re.sub(r'(?<![.!?:])\n(?!\n)', ' ', text)
           text = re.sub(r' +', ' ', text)
+
+          if quellsprache == 'en':
+              from transformers import MarianMTModel, MarianTokenizer
+              modellname = 'Helsinki-NLP/opus-mt-en-de'
+              tok = MarianTokenizer.from_pretrained(modellname)
+              modell = MarianMTModel.from_pretrained(modellname)
+              saetze = re.split(r'(?<=[.!?]) +', text)
+              uebersetzt = []
+              for i in range(0, len(saetze), 16):
+                  block = saetze[i:i+16]
+                  eingabe = tok(block, return_tensors='pt', padding=True, truncation=True, max_length=400)
+                  ausgabe = modell.generate(**eingabe, max_length=400)
+                  uebersetzt.extend([tok.decode(o, skip_special_tokens=True) for o in ausgabe])
+              text = ' '.join(uebersetzt)
+
+          os.makedirs('text', exist_ok=True)
           with open('text/buch_glatt.txt', 'w', encoding='utf-8') as f:
               f.write(text)
           "
@@ -45,15 +101,21 @@ jobs:
         run: |
           ffmpeg -i ausgabe.wav -codec:a libmp3lame -qscale:a 2 hoerbuch.mp3
 
-      - name: MP3 per E-Mail versenden
+      - name: MP3 als Release veröffentlichen
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: hoerbuch-${{ github.run_id }}
+          files: "*.mp3"
+          body: "Automatisch erstelltes Hörbuch"
+
+      - name: E-Mail mit Download-Link senden
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
           server_port: 465
           username: ${{ secrets.GMAIL_USERNAME }}
           password: ${{ secrets.GMAIL_PASSWORD }}
-          subject: Dein fertiges Hörbuch
+          subject: "Dein fertiges Hörbuch"
           to: ${{ secrets.RECIPIENT_EMAIL }}
           from: Hörbuch-Bot
-          body: Anbei dein fertiges Hörbuch als MP3.
-          attachments: hoerbuch.mp3
+          body: "Dein Hörbuch ist fertig. Download hier: https://github.com/Melvin-Udall/H-rb-cher/releases/tag/hoerbuch-${{ github.run_id }}"
