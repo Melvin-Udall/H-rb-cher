@@ -38,6 +38,9 @@ jobs:
           ./piper/piper --model voices/de_DE-thorsten-high.onnx \
             --output_file ausgabe.wav < text/buch_glatt.txt
 
+      - name: FFmpeg installieren
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
       - name: WAV zu MP3 konvertieren
         run: |
           ffmpeg -i ausgabe.wav -codec:a libmp3lame -qscale:a 2 hoerbuch.mp3
