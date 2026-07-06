@@ -1,0 +1,56 @@
+name: Hörbuch erstellen
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-audiobook:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repository auschecken
+        uses: actions/checkout@v4
+
+      - name: Piper installieren
+        run: |
+          wget https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz
+          tar xzf piper_linux_x86_64.tar.gz
+
+      - name: Thorsten-High-Stimme herunterladen
+        run: |
+          mkdir -p voices
+          wget -O voices/de_DE-thorsten-high.onnx https://huggingface.co/Thorsten-Voice/Piper/resolve/main/de_DE-thorsten-high.onnx
+          wget -O voices/de_DE-thorsten-high.onnx.json https://huggingface.co/Thorsten-Voice/Piper/resolve/main/de_DE-thorsten-high.onnx.json
+
+      - name: Text glätten
+        run: |
+          python3 -c "
+          import re
+          with open('text/buch.txt', encoding='utf-8') as f:
+              text = f.read()
+          text = re.sub(r'(?<![.!?:])\n(?!\n)', ' ', text)
+          text = re.sub(r' +', ' ', text)
+          with open('text/buch_glatt.txt', 'w', encoding='utf-8') as f:
+              f.write(text)
+          "
+
+      - name: Sprachsynthese mit Piper
+        run: |
+          ./piper/piper --model voices/de_DE-thorsten-high.onnx \
+            --output_file ausgabe.wav < text/buch_glatt.txt
+
+      - name: WAV zu MP3 konvertieren
+        run: |
+          ffmpeg -i ausgabe.wav -codec:a libmp3lame -qscale:a 2 hoerbuch.mp3
+
+      - name: MP3 per E-Mail versenden
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.GMAIL_USERNAME }}
+          password: ${{ secrets.GMAIL_PASSWORD }}
+          subject: Dein fertiges Hörbuch
+          to: ${{ secrets.RECIPIENT_EMAIL }}
+          from: Hörbuch-Bot
+          body: Anbei dein fertiges Hörbuch als MP3.
+          attachments: hoerbuch.mp3
