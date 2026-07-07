@@ -1,0 +1,5 @@
+Dies ist ein kurzer Testtext für den ersten Probelauf des Hörbuch-Workflows. Er dient ausschließlich dazu, zu prüfen, ob die Textaufbereitung, die Sprachsynthese und das Zusammenfügen zu einer einzigen MP3-Datei technisch einwandfrei funktionieren.
+
+Da dieser Text nur wenige Sätze umfasst, wird die automatische Berechnung im Workflow genau einen einzigen Teil erzeugen, keine zwölf Teile. Das spart Zeit und ist der ideale erste Test, bevor ein großes Buch verarbeitet wird.
+
+Wenn Sie diesen Text am Ende als MP3-Datei per E-Mail-Link empfangen und die Stimme klar und deutlich klingt, war der Testlauf erfolgreich. Vielen Dank fürs Testen.
