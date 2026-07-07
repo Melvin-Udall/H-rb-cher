@@ -58,14 +58,14 @@ jobs:
                   if item.get_type() == ebooklib.ITEM_DOCUMENT:
                       soup = BeautifulSoup(item.get_content(), 'html.parser')
                       teile_roh.append(soup.get_text())
-              text = '\n'.join(teile_roh)
+              text = '\\n'.join(teile_roh)
           elif endung == 'pdf':
               import fitz
               doc = fitz.open(pfad)
               teile_roh = [seite.get_text() for seite in doc]
-              text = '\n'.join(teile_roh)
+              text = '\\n'.join(teile_roh)
 
-          text = re.sub(r'(?<![.!?:])\n(?!\n)', ' ', text)
+          text = re.sub(r'(?<![.!?:])\\n(?!\\n)', ' ', text)
           text = re.sub(r' +', ' ', text)
 
           if quellsprache == 'en':
@@ -95,22 +95,28 @@ jobs:
 
           saetze = re.split(r'(?<=[.!?]) +', text)
           gesamt_saetze = len(saetze)
-          saetze_pro_teil = math.ceil(gesamt_saetze / anzahl_teile)
+          anzahl_teile = max(1, min(anzahl_teile, gesamt_saetze))
+          saetze_pro_teil = gesamt_saetze // anzahl_teile
+          rest = gesamt_saetze % anzahl_teile
 
           os.makedirs('text', exist_ok=True)
+          start = 0
           for i in range(anzahl_teile):
-              start = i * saetze_pro_teil
-              ende = start + saetze_pro_teil
+              extra = 1 if i < rest else 0
+              ende = start + saetze_pro_teil + extra
               teiltext = ' '.join(saetze[start:ende])
               nummer = str(i + 1).zfill(2)
               with open(f'text/teil_{nummer}.txt', 'w', encoding='utf-8') as f:
                   f.write(teiltext)
+              if not teiltext.strip():
+                  print(f'::error::Teil {nummer} ist leer! start={start} ende={ende} gesamt_saetze={gesamt_saetze}')
+              start = ende
 
           matrix_liste = [str(i + 1).zfill(2) for i in range(anzahl_teile)]
           github_output = os.environ['GITHUB_OUTPUT']
           with open(github_output, 'a') as f:
-              f.write(f'matrix={json.dumps(matrix_liste)}\n')
-              f.write(f'teilanzahl={anzahl_teile}\n')
+              f.write(f'matrix={json.dumps(matrix_liste)}\\n')
+              f.write(f'teilanzahl={anzahl_teile}\\n')
           "
 
       - name: Textteile als Artefakt hochladen
