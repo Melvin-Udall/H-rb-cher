@@ -152,6 +152,24 @@ jobs:
           ./piper/piper --model voices/de_DE-thorsten-high.onnx \
             --output_file teil_${{ matrix.teil }}.wav < text/teil_${{ matrix.teil }}.txt
 
+      - name: Diagnose WAV-Datei prüfen
+        run: |
+          echo "Inhalt des Arbeitsverzeichnisses:"
+          ls -la
+          echo ""
+          echo "Inhalt des text-Ordners:"
+          ls -la text/
+          echo ""
+          if [ -f "teil_${{ matrix.teil }}.wav" ]; then
+            echo "WAV-Datei vorhanden. Groesse:"
+            ls -la teil_${{ matrix.teil }}.wav
+          else
+            echo "FEHLER: WAV-Datei teil_${{ matrix.teil }}.wav wurde nicht erzeugt!"
+            echo "Inhalt der Textdatei, die vertont werden sollte:"
+            cat text/teil_${{ matrix.teil }}.txt || echo "Textdatei ebenfalls nicht vorhanden!"
+            exit 1
+          fi
+
       - name: FFmpeg installieren
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
