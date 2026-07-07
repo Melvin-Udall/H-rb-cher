@@ -12,35 +12,28 @@ on:
           - de
           - en
 
-permissions:
-  contents: write
-
 jobs:
-
   textaufbereitung:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
     outputs:
-      matrix: ${{ steps.teilen.outputs.matrix }}
-      teilanzahl: ${{ steps.teilen.outputs.teilanzahl }}
+      teile: ${{ steps.split.outputs.teile }}
     steps:
       - name: Repository auschecken
         uses: actions/checkout@v4
 
       - name: Python-Pakete installieren
-        run: |
-          pip install ebooklib beautifulsoup4 pymupdf transformers sentencepiece torch --quiet
+        run: pip install ebooklib beautifulsoup4 pymupdf transformers sentencepiece torch --quiet
 
       - name: Text extrahieren, übersetzen, glätten und in Teile splitten
-        id: teilen
+        id: split
         run: |
           python3 -c "
           import os, re, glob, json, math
 
           quellsprache = '${{ github.event.inputs.quellsprache }}'
+          WORTE_PRO_TEIL = 8000
 
-          dateien = glob.glob('text/buch.*')
-          dateien = [d for d in dateien if not d.endswith('.gitkeep')]
+          dateien = [d for d in glob.glob('text/buch.*') if not d.endswith('.gitkeep')]
           pfad = dateien[0]
           endung = pfad.split('.')[-1].lower()
 
@@ -53,88 +46,72 @@ jobs:
               import ebooklib
               from bs4 import BeautifulSoup
               book = epub.read_epub(pfad)
-              teile_roh = []
+              teile_html = []
               for item in book.get_items():
                   if item.get_type() == ebooklib.ITEM_DOCUMENT:
                       soup = BeautifulSoup(item.get_content(), 'html.parser')
-                      teile_roh.append(soup.get_text())
-              text = '\\n'.join(teile_roh)
+                      teile_html.append(soup.get_text())
+              text = '\n'.join(teile_html)
           elif endung == 'pdf':
               import fitz
               doc = fitz.open(pfad)
-              teile_roh = [seite.get_text() for seite in doc]
-              text = '\\n'.join(teile_roh)
+              text = '\n'.join(seite.get_text() for seite in doc)
 
-          text = re.sub(r'(?<![.!?:])\\n(?!\\n)', ' ', text)
+          text = re.sub(r'(?<![.!?:])\n(?!\n)', ' ', text)
           text = re.sub(r' +', ' ', text)
+
+          saetze = re.split(r'(?<=[.!?]) +', text)
+          print(f'Wortanzahl: {len(text.split())}')
 
           if quellsprache == 'en':
               from transformers import MarianMTModel, MarianTokenizer
               modellname = 'Helsinki-NLP/opus-mt-en-de'
               tok = MarianTokenizer.from_pretrained(modellname)
               modell = MarianMTModel.from_pretrained(modellname)
-              saetze = re.split(r'(?<=[.!?]) +', text)
               uebersetzt = []
               for i in range(0, len(saetze), 16):
                   block = saetze[i:i+16]
                   eingabe = tok(block, return_tensors='pt', padding=True, truncation=True, max_length=400)
                   ausgabe = modell.generate(**eingabe, max_length=400)
-                  uebersetzt.extend([tok.decode(o, skip_special_tokens=True) for o in ausgabe])
-              text = ' '.join(uebersetzt)
+                  uebersetzt.extend(tok.decode(o, skip_special_tokens=True) for o in ausgabe)
+              saetze = uebersetzt
 
-          woerter = len(text.split())
-          WOERTER_PRO_TEIL = 8000
-          MAX_TEILE = 12
-          anzahl_teile = max(1, min(MAX_TEILE, math.ceil(woerter / WOERTER_PRO_TEIL)))
-
-          if woerter / anzahl_teile > WOERTER_PRO_TEIL:
-              print(f'::warning::Text hat {woerter} Woerter, das Limit von {MAX_TEILE} Teilen wird erreicht. Pro Teil entfallen dadurch mehr als {WOERTER_PRO_TEIL} Woerter als geplant. Timeout im Blick behalten.')
-
-          print(f'Wortanzahl: {woerter}')
+          gesamttext = ' '.join(saetze)
+          woerter = gesamttext.split()
+          anzahl_teile = max(1, math.ceil(len(woerter) / WORTE_PRO_TEIL))
           print(f'Berechnete Teilanzahl: {anzahl_teile}')
 
-          saetze = re.split(r'(?<=[.!?]) +', text)
-          gesamt_saetze = len(saetze)
-          anzahl_teile = max(1, min(anzahl_teile, gesamt_saetze))
-          saetze_pro_teil = gesamt_saetze // anzahl_teile
-          rest = gesamt_saetze % anzahl_teile
-
           os.makedirs('text', exist_ok=True)
-          start = 0
+          teile_liste = []
           for i in range(anzahl_teile):
-              extra = 1 if i < rest else 0
-              ende = start + saetze_pro_teil + extra
-              teiltext = ' '.join(saetze[start:ende])
+              start = i * WORTE_PRO_TEIL
+              ende = start + WORTE_PRO_TEIL
+              teiltext = ' '.join(woerter[start:ende])
               nummer = str(i + 1).zfill(2)
-              with open(f'text/teil_{nummer}.txt', 'w', encoding='utf-8') as f:
+              dateiname = f'text/teil_{nummer}.txt'
+              with open(dateiname, 'w', encoding='utf-8') as f:
                   f.write(teiltext)
-              if not teiltext.strip():
-                  print(f'::error::Teil {nummer} ist leer! start={start} ende={ende} gesamt_saetze={gesamt_saetze}')
-              start = ende
+              if len(teiltext.strip()) == 0:
+                  raise SystemExit(f'FEHLER: Teil {nummer} ist leer!')
+              teile_liste.append(nummer)
 
-          matrix_liste = [str(i + 1).zfill(2) for i in range(anzahl_teile)]
-          github_output = os.environ['GITHUB_OUTPUT']
-          with open(github_output, 'a') as f:
-              f.write(f'matrix={json.dumps(matrix_liste)}\\n')
-              f.write(f'teilanzahl={anzahl_teile}\\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'teile={json.dumps(teile_liste)}\n')
           "
 
-      - name: Textteile als Artefakt hochladen
+      - name: Textteile hochladen
         uses: actions/upload-artifact@v4
         with:
           name: textteile
           path: text/teil_*.txt
-          retention-days: 1
 
   sprachsynthese:
     needs: textaufbereitung
     runs-on: ubuntu-latest
-    timeout-minutes: 90
     strategy:
-      fail-fast: true
-      max-parallel: 6
       matrix:
-        teil: ${{ fromJSON(needs.textaufbereitung.outputs.matrix) }}
+        teil: ${{ fromJson(needs.textaufbereitung.outputs.teile) }}
+      fail-fast: false
     steps:
       - name: Textteile herunterladen
         uses: actions/download-artifact@v4
@@ -158,69 +135,44 @@ jobs:
           ./piper/piper --model voices/de_DE-thorsten-high.onnx \
             --output_file teil_${{ matrix.teil }}.wav < text/teil_${{ matrix.teil }}.txt
 
-      - name: Diagnose WAV-Datei prüfen
-        run: |
-          echo "Inhalt des Arbeitsverzeichnisses:"
-          ls -la
-          echo ""
-          echo "Inhalt des text-Ordners:"
-          ls -la text/
-          echo ""
-          if [ -f "teil_${{ matrix.teil }}.wav" ]; then
-            echo "WAV-Datei vorhanden. Groesse:"
-            ls -la teil_${{ matrix.teil }}.wav
-          else
-            echo "FEHLER: WAV-Datei teil_${{ matrix.teil }}.wav wurde nicht erzeugt!"
-            echo "Inhalt der Textdatei, die vertont werden sollte:"
-            cat text/teil_${{ matrix.teil }}.txt || echo "Textdatei ebenfalls nicht vorhanden!"
-            exit 1
-          fi
-
       - name: FFmpeg installieren
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
       - name: WAV zu MP3 konvertieren
-        run: |
-          ffmpeg -i teil_${{ matrix.teil }}.wav -codec:a libmp3lame -qscale:a 2 teil_${{ matrix.teil }}.mp3
+        run: ffmpeg -i teil_${{ matrix.teil }}.wav -codec:a libmp3lame -qscale:a 2 teil_${{ matrix.teil }}.mp3
 
       - name: MP3-Teil als Artefakt hochladen
         uses: actions/upload-artifact@v4
         with:
           name: mp3-teil-${{ matrix.teil }}
           path: teil_${{ matrix.teil }}.mp3
-          retention-days: 1
 
   zusammenfuegen:
-    needs: [textaufbereitung, sprachsynthese]
+    needs: sprachsynthese
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     steps:
       - name: Alle MP3-Teile herunterladen
         uses: actions/download-artifact@v4
         with:
           pattern: mp3-teil-*
-          path: teile
           merge-multiple: true
+          path: teile
 
       - name: FFmpeg installieren
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
-      - name: Reihenfolge-Liste für FFmpeg erstellen
-        run: |
-          for datei in $(ls teile/*.mp3 | sort); do
-            echo "file '$datei'" >> liste.txt
-          done
-
       - name: MP3-Teile zusammenfügen
         run: |
-          ffmpeg -f concat -safe 0 -i liste.txt -c copy hoerbuch.mp3
+          cd teile
+          for f in $(ls teil_*.mp3 | sort); do echo "file '$f'" >> liste.txt; done
+          ffmpeg -f concat -safe 0 -i liste.txt -c copy ../hoerbuch.mp3
 
       - name: MP3 als Release veröffentlichen
         uses: softprops/action-gh-release@v2
         with:
           tag_name: hoerbuch-${{ github.run_id }}
           files: "hoerbuch.mp3"
-          body: "Automatisch erstelltes Hörbuch (${{ needs.textaufbereitung.outputs.teilanzahl }} Teile)"
+          body: "Automatisch erstelltes Hörbuch"
 
       - name: E-Mail mit Download-Link senden
         uses: dawidd6/action-send-mail@v3
