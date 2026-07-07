@@ -12,6 +12,9 @@ on:
           - de
           - en
 
+permissions:
+  contents: write
+
 jobs:
 
   textaufbereitung:
