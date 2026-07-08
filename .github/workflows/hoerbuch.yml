@@ -37,19 +37,20 @@ jobs:
           wget -O voices/de_DE-thorsten-high.onnx https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx
           wget -O voices/de_DE-thorsten-high.onnx.json https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx.json
 
-      - name: Text extrahieren, übersetzen und glätten
+      - name: Text extrahieren, übersetzen, splitten
         run: |
           python3 - <<'PY'
-          import os, re, glob
+          import os, re, glob, math
 
           quellsprache = '${{ github.event.inputs.quellsprache }}'
+          dateien = [d for d in glob.glob('text/buch.*') if not d.endswith('.gitkeep')]
+          if not dateien:
+              raise SystemExit('Keine Buchdatei gefunden')
 
-          dateien = glob.glob('text/buch.*')
-          dateien = [d for d in dateien if not d.endswith('.gitkeep')]
           pfad = dateien[0]
           endung = pfad.split('.')[-1].lower()
-
           text = ''
+
           if endung == 'txt':
               with open(pfad, encoding='utf-8') as f:
                   text = f.read()
@@ -63,22 +64,30 @@ jobs:
                   if item.get_type() == ebooklib.ITEM_DOCUMENT:
                       soup = BeautifulSoup(item.get_content(), 'html.parser')
                       teile.append(soup.get_text())
-              text = '\n'.join(teile)
+              text = '
+'.join(teile)
           elif endung == 'pdf':
               import fitz
               doc = fitz.open(pfad)
-              teile = [seite.get_text() for seite in doc]
-              text = '\n'.join(teile)
+              text = '
+'.join(seite.get_text() for seite in doc)
+          else:
+              raise SystemExit('Unbekanntes Dateiformat')
 
-          text = re.sub(r'(?<![.!?:])\n(?!\n)', ' ', text)
-          text = re.sub(r' +', ' ', text)
+          text = re.sub(r'
+', '
+', text)
+          text = re.sub(r'(?<![.!?:])
+(?!
+)', ' ', text)
+          text = re.sub(r' +', ' ', text).strip()
 
           if quellsprache == 'en':
               from transformers import MarianMTModel, MarianTokenizer
               modellname = 'Helsinki-NLP/opus-mt-en-de'
               tok = MarianTokenizer.from_pretrained(modellname)
               modell = MarianMTModel.from_pretrained(modellname)
-              saetze = re.split(r'(?<=[.!?]) +', text)
+              saetze = [s.strip() for s in re.split(r'(?<=[.!?])s+', text) if s.strip()]
               uebersetzt = []
               for i in range(0, len(saetze), 16):
                   block = saetze[i:i+16]
@@ -86,22 +95,75 @@ jobs:
                   ausgabe = modell.generate(**eingabe, max_length=400)
                   uebersetzt.extend([tok.decode(o, skip_special_tokens=True) for o in ausgabe])
               text = ' '.join(uebersetzt)
+              text = re.sub(r' +', ' ', text).strip()
 
           os.makedirs('text', exist_ok=True)
           with open('text/buch_glatt.txt', 'w', encoding='utf-8') as f:
               f.write(text)
+
+          saetze = [s.strip() for s in re.split(r'(?<=[.!?])s+', text) if s.strip()]
+          if not saetze:
+              raise SystemExit('Kein Text nach dem Bereinigen gefunden')
+
+          total_chars = sum(len(s) for s in saetze)
+          target_chars = 10000
+          chunk_count = max(1, min(12, math.ceil(total_chars / target_chars)))
+
+          chunks = []
+          current = []
+          current_len = 0
+          target_per_chunk = math.ceil(total_chars / chunk_count)
+
+          for s in saetze:
+              if current and current_len >= target_per_chunk and len(chunks) < chunk_count - 1:
+                  chunks.append(' '.join(current).strip())
+                  current = []
+                  current_len = 0
+              current.append(s)
+              current_len += len(s) + 1
+
+          if current:
+              chunks.append(' '.join(current).strip())
+
+          while len(chunks) > chunk_count:
+              last = chunks.pop()
+              chunks[-1] = (chunks[-1] + ' ' + last).strip()
+
+          while len(chunks) < chunk_count and len(chunks) > 1:
+              last = chunks.pop()
+              split_at = last.rfind(' ', 0, len(last) // 2)
+              if split_at == -1:
+                  split_at = len(last) // 2
+              chunks.append(last[:split_at].strip())
+              chunks.append(last[split_at:].strip())
+
+          chunks = [c for c in chunks if c.strip()]
+
+          with open('chunk_count.txt', 'w', encoding='utf-8') as f:
+              f.write(str(len(chunks)))
+
+          for i, chunk in enumerate(chunks, 1):
+              with open(f'text/chunk_{i:02d}.txt', 'w', encoding='utf-8') as f:
+                  f.write(chunk)
           PY
 
       - name: Sprachsynthese mit Piper
         run: |
-          ./piper/piper --model voices/de_DE-thorsten-high.onnx \
-            --output_file ausgabe.wav < text/buch_glatt.txt
+          mkdir -p chunks_wav
+          count=$(cat chunk_count.txt)
+          for i in $(seq 1 "$count"); do
+            n=$(printf "%02d" "$i")
+            ./piper/piper --model voices/de_DE-thorsten-high.onnx --output_file "chunks_wav/chunk_${n}.wav" < "text/chunk_${n}.txt"
+          done
 
       - name: FFmpeg installieren
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
-      - name: WAV zu MP3 konvertieren
+      - name: WAVs zusammenführen und MP3 erzeugen
         run: |
+          printf "file '%s'
+" chunks_wav/chunk_*.wav > concat_list.txt
+          ffmpeg -f concat -safe 0 -i concat_list.txt -c copy ausgabe.wav
           ffmpeg -i ausgabe.wav -codec:a libmp3lame -qscale:a 2 hoerbuch.mp3
 
       - name: MP3 als Release veröffentlichen
