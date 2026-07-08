@@ -16,116 +16,15 @@ permissions:
   contents: write
 
 jobs:
-  textaufbereitung:
+  build-audiobook:
     runs-on: ubuntu-latest
-    outputs:
-      teile: ${{ steps.split.outputs.teile }}
     steps:
       - name: Repository auschecken
         uses: actions/checkout@v4
 
       - name: Python-Pakete installieren
-        run: pip install ebooklib beautifulsoup4 pymupdf transformers sentencepiece torch --quiet
-
-      - name: Text extrahieren, übersetzen, glätten und in Teile splitten
-        id: split
         run: |
-          python3 -c "
-          import os, re, glob, json, math
-
-          quellsprache = '${{ github.event.inputs.quellsprache }}'
-          WORTE_PRO_TEIL = 8000
-
-          dateien = [d for d in glob.glob('text/buch.*') if not d.endswith('.gitkeep')]
-          pfad = dateien[0]
-          endung = pfad.split('.')[-1].lower()
-
-          text = ''
-          if endung == 'txt':
-              with open(pfad, encoding='utf-8') as f:
-                  text = f.read()
-          elif endung == 'epub':
-              from ebooklib import epub
-              import ebooklib
-              from bs4 import BeautifulSoup
-              book = epub.read_epub(pfad)
-              teile_html = []
-              for item in book.get_items():
-                  if item.get_type() == ebooklib.ITEM_DOCUMENT:
-                      soup = BeautifulSoup(item.get_content(), 'html.parser')
-                      teile_html.append(soup.get_text())
-              text = '
-'.join(teile_html)
-          elif endung == 'pdf':
-              import fitz
-              doc = fitz.open(pfad)
-              text = '
-'.join(seite.get_text() for seite in doc)
-
-          text = re.sub(r'(?<![.!?:])
-(?!
-)', ' ', text)
-          text = re.sub(r' +', ' ', text)
-
-          saetze = re.split(r'(?<=[.!?]) +', text)
-          print(f'Wortanzahl: {len(text.split())}')
-
-          if quellsprache == 'en':
-              from transformers import MarianMTModel, MarianTokenizer
-              modellname = 'Helsinki-NLP/opus-mt-en-de'
-              tok = MarianTokenizer.from_pretrained(modellname)
-              modell = MarianMTModel.from_pretrained(modellname)
-              uebersetzt = []
-              for i in range(0, len(saetze), 16):
-                  block = saetze[i:i+16]
-                  eingabe = tok(block, return_tensors='pt', padding=True, truncation=True, max_length=400)
-                  ausgabe = modell.generate(**eingabe, max_length=400)
-                  uebersetzt.extend(tok.decode(o, skip_special_tokens=True) for o in ausgabe)
-              saetze = uebersetzt
-
-          gesamttext = ' '.join(saetze)
-          woerter = gesamttext.split()
-          anzahl_teile = max(1, math.ceil(len(woerter) / WORTE_PRO_TEIL))
-          print(f'Berechnete Teilanzahl: {anzahl_teile}')
-
-          os.makedirs('text', exist_ok=True)
-          teile_liste = []
-          for i in range(anzahl_teile):
-              start = i * WORTE_PRO_TEIL
-              ende = start + WORTE_PRO_TEIL
-              teiltext = ' '.join(woerter[start:ende])
-              nummer = str(i + 1).zfill(2)
-              dateiname = f'text/teil_{nummer}.txt'
-              with open(dateiname, 'w', encoding='utf-8') as f:
-                  f.write(teiltext)
-              if len(teiltext.strip()) == 0:
-                  raise SystemExit(f'FEHLER: Teil {nummer} ist leer!')
-              teile_liste.append(nummer)
-
-          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write(f'teile={json.dumps(teile_liste)}
-')
-          "
-
-      - name: Textteile hochladen
-        uses: actions/upload-artifact@v4
-        with:
-          name: textteile
-          path: text/teil_*.txt
-
-  sprachsynthese:
-    needs: textaufbereitung
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        teil: ${{ fromJson(needs.textaufbereitung.outputs.teile) }}
-      fail-fast: false
-    steps:
-      - name: Textteile herunterladen
-        uses: actions/download-artifact@v4
-        with:
-          name: textteile
-          path: text
+          pip install ebooklib beautifulsoup4 pymupdf transformers sentencepiece torch --quiet
 
       - name: Piper installieren
         run: |
@@ -138,54 +37,82 @@ jobs:
           wget -O voices/de_DE-thorsten-high.onnx https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx
           wget -O voices/de_DE-thorsten-high.onnx.json https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx.json
 
+      - name: Text extrahieren, übersetzen und glätten
+        run: |
+          python3 -c "
+          import os, re, glob
+
+          quellsprache = '${{ github.event.inputs.quellsprache }}'
+
+          dateien = glob.glob('text/buch.*')
+          dateien = [d for d in dateien if not d.endswith('.gitkeep')]
+          pfad = dateien[0]
+          endung = pfad.split('.')[-1].lower()
+
+          text = ''
+          if endung == 'txt':
+              with open(pfad, encoding='utf-8') as f:
+                  text = f.read()
+          elif endung == 'epub':
+              from ebooklib import epub
+              import ebooklib
+              from bs4 import BeautifulSoup
+              book = epub.read_epub(pfad)
+              teile = []
+              for item in book.get_items():
+                  if item.get_type() == ebooklib.ITEM_DOCUMENT:
+                      soup = BeautifulSoup(item.get_content(), 'html.parser')
+                      teile.append(soup.get_text())
+              text = '
+'.join(teile)
+          elif endung == 'pdf':
+              import fitz
+              doc = fitz.open(pfad)
+              teile = [seite.get_text() for seite in doc]
+              text = '
+'.join(teile)
+
+          text = re.sub(r'(?<![.!?:])
+(?!
+)', ' ', text)
+          text = re.sub(r' +', ' ', text)
+
+          if quellsprache == 'en':
+              from transformers import MarianMTModel, MarianTokenizer
+              modellname = 'Helsinki-NLP/opus-mt-en-de'
+              tok = MarianTokenizer.from_pretrained(modellname)
+              modell = MarianMTModel.from_pretrained(modellname)
+              saetze = re.split(r'(?<=[.!?]) +', text)
+              uebersetzt = []
+              for i in range(0, len(saetze), 16):
+                  block = saetze[i:i+16]
+                  eingabe = tok(block, return_tensors='pt', padding=True, truncation=True, max_length=400)
+                  ausgabe = modell.generate(**eingabe, max_length=400)
+                  uebersetzt.extend([tok.decode(o, skip_special_tokens=True) for o in ausgabe])
+              text = ' '.join(uebersetzt)
+
+          os.makedirs('text', exist_ok=True)
+          with open('text/buch_glatt.txt', 'w', encoding='utf-8') as f:
+              f.write(text)
+          "
+
       - name: Sprachsynthese mit Piper
         run: |
           ./piper/piper --model voices/de_DE-thorsten-high.onnx \
-            --output_file teil_${{ matrix.teil }}.wav < text/teil_${{ matrix.teil }}.txt
+            --output_file ausgabe.wav < text/buch_glatt.txt
 
       - name: FFmpeg installieren
-        run: |
-          sudo rm -f /etc/apt/sources.list.d/*microsoft*.list
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
       - name: WAV zu MP3 konvertieren
-        run: ffmpeg -i teil_${{ matrix.teil }}.wav -codec:a libmp3lame -qscale:a 2 teil_${{ matrix.teil }}.mp3
-
-      - name: MP3-Teil als Artefakt hochladen
-        uses: actions/upload-artifact@v4
-        with:
-          name: mp3-teil-${{ matrix.teil }}
-          path: teil_${{ matrix.teil }}.mp3
-
-  zusammenfuegen:
-    needs: sprachsynthese
-    runs-on: ubuntu-latest
-    steps:
-      - name: Alle MP3-Teile herunterladen
-        uses: actions/download-artifact@v4
-        with:
-          pattern: mp3-teil-*
-          merge-multiple: true
-          path: teile
-
-      - name: FFmpeg installieren
         run: |
-          sudo rm -f /etc/apt/sources.list.d/*microsoft*.list
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
-
-      - name: MP3-Teile zusammenfügen
-        run: |
-          cd teile
-          for f in $(ls teil_*.mp3 | sort); do echo "file '$f'" >> liste.txt; done
-          ffmpeg -f concat -safe 0 -i liste.txt -c copy ../hoerbuch.mp3
+          ffmpeg -i ausgabe.wav -codec:a libmp3lame -qscale:a 2 hoerbuch.mp3
 
       - name: MP3 als Release veröffentlichen
         uses: softprops/action-gh-release@v2
         with:
           tag_name: hoerbuch-${{ github.run_id }}
-          files: "hoerbuch.mp3"
+          files: "*.mp3"
           body: "Automatisch erstelltes Hörbuch"
 
       - name: E-Mail mit Download-Link senden
