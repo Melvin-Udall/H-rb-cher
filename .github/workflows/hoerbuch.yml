@@ -28,7 +28,7 @@ jobs:
 
       - name: Piper installieren
         run: |
-          wget https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz
+          wget -O piper_linux_x86_64.tar.gz https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz
           tar xzf piper_linux_x86_64.tar.gz
 
       - name: Thorsten-High-Stimme herunterladen
@@ -39,7 +39,7 @@ jobs:
 
       - name: Text extrahieren, übersetzen und glätten
         run: |
-          python3 -c "
+          python3 - <<'PY'
           import os, re, glob
 
           quellsprache = '${{ github.event.inputs.quellsprache }}'
@@ -63,18 +63,14 @@ jobs:
                   if item.get_type() == ebooklib.ITEM_DOCUMENT:
                       soup = BeautifulSoup(item.get_content(), 'html.parser')
                       teile.append(soup.get_text())
-              text = '
-'.join(teile)
+              text = '\n'.join(teile)
           elif endung == 'pdf':
               import fitz
               doc = fitz.open(pfad)
               teile = [seite.get_text() for seite in doc]
-              text = '
-'.join(teile)
+              text = '\n'.join(teile)
 
-          text = re.sub(r'(?<![.!?:])
-(?!
-)', ' ', text)
+          text = re.sub(r'(?<![.!?:])\n(?!\n)', ' ', text)
           text = re.sub(r' +', ' ', text)
 
           if quellsprache == 'en':
@@ -94,7 +90,7 @@ jobs:
           os.makedirs('text', exist_ok=True)
           with open('text/buch_glatt.txt', 'w', encoding='utf-8') as f:
               f.write(text)
-          "
+          PY
 
       - name: Sprachsynthese mit Piper
         run: |
