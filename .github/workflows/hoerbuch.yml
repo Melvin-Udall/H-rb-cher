@@ -18,12 +18,25 @@ permissions:
 jobs:
   build-audiobook:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
+
     steps:
       - name: Repository auschecken
         uses: actions/checkout@v4
 
+      - name: Python einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Systempakete installieren
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg wget
+
       - name: Python-Pakete installieren
         run: |
+          python -m pip install --upgrade pip
           pip install ebooklib beautifulsoup4 pymupdf transformers sentencepiece torch --quiet
 
       - name: Piper installieren
@@ -37,7 +50,7 @@ jobs:
           wget -O voices/de_DE-thorsten-high.onnx https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx
           wget -O voices/de_DE-thorsten-high.onnx.json https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx.json
 
-      - name: Text extrahieren, übersetzen, splitten
+      - name: Text extrahieren, übersetzen, glätten und splitten
         run: |
           python3 - <<'PY'
           import os, re, glob, math
@@ -45,10 +58,10 @@ jobs:
           quellsprache = '${{ github.event.inputs.quellsprache }}'
           dateien = [d for d in glob.glob('text/buch.*') if not d.endswith('.gitkeep')]
           if not dateien:
-              raise SystemExit('Keine Buchdatei gefunden')
+              raise SystemExit('Keine Buchdatei in text/ gefunden')
 
           pfad = dateien[0]
-          endung = pfad.split('.')[-1].lower()
+          endung = pfad.rsplit('.', 1)[-1].lower()
           text = ''
 
           if endung == 'txt':
@@ -63,16 +76,17 @@ jobs:
               for item in book.get_items():
                   if item.get_type() == ebooklib.ITEM_DOCUMENT:
                       soup = BeautifulSoup(item.get_content(), 'html.parser')
-                      teile.append(soup.get_text())
+                      teile.append(soup.get_text(" ", strip=True))
               text = '
 '.join(teile)
           elif endung == 'pdf':
               import fitz
               doc = fitz.open(pfad)
+              teile = [seite.get_text() for seite in doc]
               text = '
-'.join(seite.get_text() for seite in doc)
+'.join(teile)
           else:
-              raise SystemExit('Unbekanntes Dateiformat')
+              raise SystemExit(f'Unbekanntes Dateiformat: {endung}')
 
           text = re.sub(r'
 ', '
@@ -80,7 +94,14 @@ jobs:
           text = re.sub(r'(?<![.!?:])
 (?!
 )', ' ', text)
-          text = re.sub(r' +', ' ', text).strip()
+          text = re.sub(r'
+{2,}', '
+
+', text)
+          text = re.sub(r'[ \t]+', ' ', text).strip()
+
+          if not text:
+              raise SystemExit('Die Datei enthält keinen lesbaren Text')
 
           if quellsprache == 'en':
               from transformers import MarianMTModel, MarianTokenizer
@@ -91,11 +112,13 @@ jobs:
               uebersetzt = []
               for i in range(0, len(saetze), 16):
                   block = saetze[i:i+16]
+                  if not block:
+                      continue
                   eingabe = tok(block, return_tensors='pt', padding=True, truncation=True, max_length=400)
                   ausgabe = modell.generate(**eingabe, max_length=400)
-                  uebersetzt.extend([tok.decode(o, skip_special_tokens=True) for o in ausgabe])
+                  uebersetzt.extend(tok.decode(o, skip_special_tokens=True) for o in ausgabe)
               text = ' '.join(uebersetzt)
-              text = re.sub(r' +', ' ', text).strip()
+              text = re.sub(r's+', ' ', text).strip()
 
           os.makedirs('text', exist_ok=True)
           with open('text/buch_glatt.txt', 'w', encoding='utf-8') as f:
@@ -103,41 +126,33 @@ jobs:
 
           saetze = [s.strip() for s in re.split(r'(?<=[.!?])s+', text) if s.strip()]
           if not saetze:
-              raise SystemExit('Kein Text nach dem Bereinigen gefunden')
+              saetze = [text]
 
-          total_chars = sum(len(s) for s in saetze)
-          target_chars = 10000
-          chunk_count = max(1, min(12, math.ceil(total_chars / target_chars)))
+          total_chars = len(text)
+          ziel_chunk_groesse = 12000
+          max_chunks = 12
+          chunk_count = max(1, min(max_chunks, math.ceil(total_chars / ziel_chunk_groesse)))
+          ziel_pro_chunk = math.ceil(total_chars / chunk_count)
 
           chunks = []
-          current = []
-          current_len = 0
-          target_per_chunk = math.ceil(total_chars / chunk_count)
+          aktuell = []
+          aktuelle_len = 0
 
-          for s in saetze:
-              if current and current_len >= target_per_chunk and len(chunks) < chunk_count - 1:
-                  chunks.append(' '.join(current).strip())
-                  current = []
-                  current_len = 0
-              current.append(s)
-              current_len += len(s) + 1
+          for satz in saetze:
+              satz_len = len(satz) + 1
+              if aktuell and aktuelle_len + satz_len > ziel_pro_chunk and len(chunks) < chunk_count - 1:
+                  chunks.append(' '.join(aktuell).strip())
+                  aktuell = []
+                  aktuelle_len = 0
+              aktuell.append(satz)
+              aktuelle_len += satz_len
 
-          if current:
-              chunks.append(' '.join(current).strip())
-
-          while len(chunks) > chunk_count:
-              last = chunks.pop()
-              chunks[-1] = (chunks[-1] + ' ' + last).strip()
-
-          while len(chunks) < chunk_count and len(chunks) > 1:
-              last = chunks.pop()
-              split_at = last.rfind(' ', 0, len(last) // 2)
-              if split_at == -1:
-                  split_at = len(last) // 2
-              chunks.append(last[:split_at].strip())
-              chunks.append(last[split_at:].strip())
+          if aktuell:
+              chunks.append(' '.join(aktuell).strip())
 
           chunks = [c for c in chunks if c.strip()]
+          if not chunks:
+              raise SystemExit('Chunk-Erstellung fehlgeschlagen')
 
           with open('chunk_count.txt', 'w', encoding='utf-8') as f:
               f.write(str(len(chunks)))
@@ -153,16 +168,15 @@ jobs:
           count=$(cat chunk_count.txt)
           for i in $(seq 1 "$count"); do
             n=$(printf "%02d" "$i")
-            ./piper/piper --model voices/de_DE-thorsten-high.onnx --output_file "chunks_wav/chunk_${n}.wav" < "text/chunk_${n}.txt"
+            ./piper/piper \
+              --model voices/de_DE-thorsten-high.onnx \
+              --output_file "chunks_wav/chunk_${n}.wav" < "text/chunk_${n}.txt"
           done
-
-      - name: FFmpeg installieren
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
       - name: WAVs zusammenführen und MP3 erzeugen
         run: |
-          printf "file '%s'
-" chunks_wav/chunk_*.wav > concat_list.txt
+          find chunks_wav -name 'chunk_*.wav' | sort > wav_list.txt
+          awk '{print "file '" $0 "'"}' wav_list.txt > concat_list.txt
           ffmpeg -f concat -safe 0 -i concat_list.txt -c copy ausgabe.wav
           ffmpeg -i ausgabe.wav -codec:a libmp3lame -qscale:a 2 hoerbuch.mp3
 
@@ -170,17 +184,18 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: hoerbuch-${{ github.run_id }}
-          files: "*.mp3"
-          body: "Automatisch erstelltes Hörbuch"
+          files: hoerbuch.mp3
+          body: Automatisch erstelltes Hörbuch
 
       - name: E-Mail mit Download-Link senden
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
           server_port: 465
+          secure: true
           username: ${{ secrets.GMAIL_USERNAME }}
           password: ${{ secrets.GMAIL_PASSWORD }}
-          subject: "Dein fertiges Hörbuch"
+          subject: Dein fertiges Hörbuch
           to: ${{ secrets.RECIPIENT_EMAIL }}
           from: Hörbuch-Bot
-          body: "Dein Hörbuch ist fertig. Download hier: https://github.com/Melvin-Udall/H-rb-cher/releases/tag/hoerbuch-${{ github.run_id }}"
+          body: Dein Hörbuch ist fertig. Download hier: https://github.com/${{ github.repository }}/releases/tag/hoerbuch-${{ github.run_id }}
