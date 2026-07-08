@@ -4,16 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       quellsprache:
-        description: 'Quellsprache (de oder en)'
+        description: "Quellsprache (de oder en)"
         required: true
-        default: 'de'
+        default: "de"
         type: choice
         options:
           - de
           - en
-
-permissions:
-  contents: write
 
 jobs:
   build-audiobook:
@@ -24,168 +21,315 @@ jobs:
       - name: Repository auschecken
         uses: actions/checkout@v4
 
-      - name: Python einrichten
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
       - name: Systempakete installieren
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg wget
+          sudo apt-get install -y ffmpeg wget unzip
+
+      - name: Python einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
       - name: Python-Pakete installieren
         run: |
           python -m pip install --upgrade pip
-          pip install ebooklib beautifulsoup4 pymupdf transformers sentencepiece torch --quiet
+          pip install --no-cache-dir \
+            ebooklib \
+            beautifulsoup4 \
+            pymupdf \
+            pdfplumber \
+            lxml \
+            transformers \
+            sentencepiece \
+            sacremoses \
+            torch
 
       - name: Piper installieren
         run: |
-          wget -O piper_linux_x86_64.tar.gz https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz
+          wget -q https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz
           tar xzf piper_linux_x86_64.tar.gz
 
       - name: Thorsten-High-Stimme herunterladen
         run: |
           mkdir -p voices
-          wget -O voices/de_DE-thorsten-high.onnx https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx
-          wget -O voices/de_DE-thorsten-high.onnx.json https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx.json
+          wget -q -O voices/de_DE-thorsten-high.onnx \
+            https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx
+          wget -q -O voices/de_DE-thorsten-high.onnx.json \
+            https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx.json
 
-      - name: Text extrahieren, übersetzen, glätten und splitten
+      - name: Text extrahieren, übersetzen, glätten und aufteilen
+        shell: bash
         run: |
-          python3 - <<'PY'
-          import os, re, glob, math
+          cat > script_prepare.py <<'PY'
+          import os
+          import re
+          import glob
+          import math
+          from pathlib import Path
 
-          quellsprache = '${{ github.event.inputs.quellsprache }}'
-          dateien = [d for d in glob.glob('text/buch.*') if not d.endswith('.gitkeep')]
-          if not dateien:
-              raise SystemExit('Keine Buchdatei in text/ gefunden')
+          QUELLSPRACHE = "${{ github.event.inputs.quellsprache }}".strip().lower()
+          TEXT_DIR = Path("text")
+          OUT_DIR = Path("output")
+          PARTS_DIR = OUT_DIR / "parts"
+          META_DIR = OUT_DIR / "meta"
 
-          pfad = dateien[0]
-          endung = pfad.rsplit('.', 1)[-1].lower()
-          text = ''
+          OUT_DIR.mkdir(parents=True, exist_ok=True)
+          PARTS_DIR.mkdir(parents=True, exist_ok=True)
+          META_DIR.mkdir(parents=True, exist_ok=True)
 
-          if endung == 'txt':
-              with open(pfad, encoding='utf-8') as f:
-                  text = f.read()
-          elif endung == 'epub':
+          files = [Path(p) for p in glob.glob("text/buch.*") if not p.endswith(".gitkeep")]
+          if not files:
+              raise SystemExit("Fehler: Keine Datei text/buch.* gefunden.")
+          if len(files) > 1:
+              raise SystemExit("Fehler: Mehr als eine Datei text/buch.* gefunden. Bitte nur eine Buchdatei im Ordner text lassen.")
+
+          pfad = files[0]
+          endung = pfad.suffix.lower()
+
+          def clean_text(t: str) -> str:
+              t = t.replace("\r\n", "\n").replace("\r", "\n")
+              t = t.replace("\u00ad", "")
+              t = re.sub(r"[ \t]+", " ", t)
+              t = re.sub(r"\n{3,}", "\n\n", t)
+              t = re.sub(r"(?<![.!?:;])\n(?!\n)", " ", t)
+              t = re.sub(r" +", " ", t)
+              t = re.sub(r" ?([,;:.!?])", r"\1", t)
+              t = re.sub(r"([,;:.!?])([^\s\"'»)\]])", r"\1 \2", t)
+              t = re.sub(r"\s+\n", "\n", t)
+              t = re.sub(r"\n\s+", "\n", t)
+              t = re.sub(r"\n{2,}", "\n\n", t)
+              return t.strip()
+
+          def read_txt(path: Path) -> str:
+              for enc in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+                  try:
+                      return path.read_text(encoding=enc)
+                  except Exception:
+                      pass
+              raise SystemExit("Fehler: TXT-Datei konnte nicht gelesen werden.")
+
+          def read_epub(path: Path) -> str:
               from ebooklib import epub
               import ebooklib
               from bs4 import BeautifulSoup
-              book = epub.read_epub(pfad)
+
+              book = epub.read_epub(str(path))
               teile = []
               for item in book.get_items():
                   if item.get_type() == ebooklib.ITEM_DOCUMENT:
-                      soup = BeautifulSoup(item.get_content(), 'html.parser')
-                      teile.append(soup.get_text(" ", strip=True))
-              text = '
-'.join(teile)
-          elif endung == 'pdf':
+                      soup = BeautifulSoup(item.get_content(), "html.parser")
+                      text = soup.get_text("\n")
+                      if text and text.strip():
+                          teile.append(text.strip())
+              return "\n\n".join(teile)
+
+          def read_pdf(path: Path) -> str:
               import fitz
-              doc = fitz.open(pfad)
-              teile = [seite.get_text() for seite in doc]
-              text = '
-'.join(teile)
+              teile = []
+              with fitz.open(str(path)) as doc:
+                  for seite in doc:
+                      tx = seite.get_text()
+                      if tx and tx.strip():
+                          teile.append(tx.strip())
+              return "\n\n".join(teile)
+
+          if endung == ".txt":
+              text = read_txt(pfad)
+          elif endung == ".epub":
+              text = read_epub(pfad)
+          elif endung == ".pdf":
+              text = read_pdf(pfad)
           else:
-              raise SystemExit(f'Unbekanntes Dateiformat: {endung}')
+              raise SystemExit(f"Fehler: Nicht unterstützte Dateiendung: {endung}")
 
-          text = re.sub(r'
-', '
-', text)
-          text = re.sub(r'(?<![.!?:])
-(?!
-)', ' ', text)
-          text = re.sub(r'
-{2,}', '
+          text = clean_text(text)
+          if not text or len(text) < 50:
+              raise SystemExit("Fehler: Zu wenig lesbarer Text extrahiert.")
 
-', text)
-          text = re.sub(r'[ \t]+', ' ', text).strip()
-
-          if not text:
-              raise SystemExit('Die Datei enthält keinen lesbaren Text')
-
-          if quellsprache == 'en':
+          if QUELLSPRACHE == "en":
               from transformers import MarianMTModel, MarianTokenizer
-              modellname = 'Helsinki-NLP/opus-mt-en-de'
-              tok = MarianTokenizer.from_pretrained(modellname)
-              modell = MarianMTModel.from_pretrained(modellname)
-              saetze = [s.strip() for s in re.split(r'(?<=[.!?])s+', text) if s.strip()]
+
+              modellname = "Helsinki-NLP/opus-mt-en-de"
+              tokenizer = MarianTokenizer.from_pretrained(modellname)
+              model = MarianMTModel.from_pretrained(modellname)
+
+              saetze = re.split(r'(?<=[.!?])\s+', text)
+              saetze = [s.strip() for s in saetze if s.strip()]
               uebersetzt = []
-              for i in range(0, len(saetze), 16):
-                  block = saetze[i:i+16]
-                  if not block:
-                      continue
-                  eingabe = tok(block, return_tensors='pt', padding=True, truncation=True, max_length=400)
-                  ausgabe = modell.generate(**eingabe, max_length=400)
-                  uebersetzt.extend(tok.decode(o, skip_special_tokens=True) for o in ausgabe)
-              text = ' '.join(uebersetzt)
-              text = re.sub(r's+', ' ', text).strip()
 
-          os.makedirs('text', exist_ok=True)
-          with open('text/buch_glatt.txt', 'w', encoding='utf-8') as f:
-              f.write(text)
+              batch = []
+              batch_chars = 0
+              max_batch_chars = 3500
 
-          saetze = [s.strip() for s in re.split(r'(?<=[.!?])s+', text) if s.strip()]
-          if not saetze:
-              saetze = [text]
+              def flush_batch(batch_list):
+                  if not batch_list:
+                      return []
+                  inputs = tokenizer(
+                      batch_list,
+                      return_tensors="pt",
+                      padding=True,
+                      truncation=True,
+                      max_length=512
+                  )
+                  outputs = model.generate(**inputs, max_length=512)
+                  return [tokenizer.decode(o, skip_special_tokens=True) for o in outputs]
+
+              for s in saetze:
+                  if len(s) > 1800:
+                      sub = re.split(r'(?<=[,;:])\s+', s)
+                  else:
+                      sub = [s]
+                  for piece in sub:
+                      piece = piece.strip()
+                      if not piece:
+                          continue
+                      if batch and batch_chars + len(piece) > max_batch_chars:
+                          uebersetzt.extend(flush_batch(batch))
+                          batch = []
+                          batch_chars = 0
+                      batch.append(piece)
+                      batch_chars += len(piece)
+
+              if batch:
+                  uebersetzt.extend(flush_batch(batch))
+
+              text = clean_text(" ".join(uebersetzt))
+
+          (TEXT_DIR / "buch_glatt.txt").write_text(text, encoding="utf-8")
 
           total_chars = len(text)
-          ziel_chunk_groesse = 12000
-          max_chunks = 12
-          chunk_count = max(1, min(max_chunks, math.ceil(total_chars / ziel_chunk_groesse)))
-          ziel_pro_chunk = math.ceil(total_chars / chunk_count)
+          words = len(re.findall(r"\S+", text))
 
-          chunks = []
-          aktuell = []
-          aktuelle_len = 0
+          target_chars_per_part = 90000
+          min_chars_per_part = 40000
+          max_chars_per_part = 120000
 
-          for satz in saetze:
-              satz_len = len(satz) + 1
-              if aktuell and aktuelle_len + satz_len > ziel_pro_chunk and len(chunks) < chunk_count - 1:
-                  chunks.append(' '.join(aktuell).strip())
-                  aktuell = []
-                  aktuelle_len = 0
-              aktuell.append(satz)
-              aktuelle_len += satz_len
+          estimated_parts = max(1, math.ceil(total_chars / target_chars_per_part))
+          target_chars = max(min_chars_per_part, min(max_chars_per_part, math.ceil(total_chars / estimated_parts)))
 
-          if aktuell:
-              chunks.append(' '.join(aktuell).strip())
+          paragraphs = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
+          parts = []
+          current = []
 
-          chunks = [c for c in chunks if c.strip()]
-          if not chunks:
-              raise SystemExit('Chunk-Erstellung fehlgeschlagen')
+          def current_len(block):
+              return sum(len(x) for x in block) + max(0, len(block) - 1) * 2
 
-          with open('chunk_count.txt', 'w', encoding='utf-8') as f:
-              f.write(str(len(chunks)))
+          def split_long_paragraph(par):
+              if len(par) <= max_chars_per_part:
+                  return [par]
+              sents = re.split(r'(?<=[.!?])\s+', par)
+              chunks = []
+              cur = []
+              cur_len = 0
+              for s in sents:
+                  s = s.strip()
+                  if not s:
+                      continue
+                  if cur and cur_len + len(s) + 1 > target_chars:
+                      chunks.append(" ".join(cur).strip())
+                      cur = [s]
+                      cur_len = len(s)
+                  else:
+                      cur.append(s)
+                      cur_len += len(s) + 1
+              if cur:
+                  chunks.append(" ".join(cur).strip())
+              return chunks
 
-          for i, chunk in enumerate(chunks, 1):
-              with open(f'text/chunk_{i:02d}.txt', 'w', encoding='utf-8') as f:
-                  f.write(chunk)
+          normalized_paragraphs = []
+          for p in paragraphs:
+              normalized_paragraphs.extend(split_long_paragraph(p))
+
+          for p in normalized_paragraphs:
+              p_len = len(p)
+              cur_len = current_len(current)
+              if current and cur_len + p_len + 2 > target_chars and cur_len >= min_chars_per_part:
+                  parts.append("\n\n".join(current).strip())
+                  current = [p]
+              else:
+                  current.append(p)
+
+          if current:
+              if parts and current_len(current) < min_chars_per_part:
+                  parts[-1] = (parts[-1] + "\n\n" + "\n\n".join(current)).strip()
+              else:
+                  parts.append("\n\n".join(current).strip())
+
+          if not parts:
+              parts = [text]
+
+          for idx, part in enumerate(parts, start=1):
+              (PARTS_DIR / f"teil_{idx:03d}.txt").write_text(part.strip() + "\n", encoding="utf-8")
+
+          info = []
+          info.append(f"Quelldatei: {pfad.name}")
+          info.append(f"Quellsprache: {QUELLSPRACHE}")
+          info.append(f"Zeichen gesamt: {total_chars}")
+          info.append(f"Wörter gesamt: {words}")
+          info.append(f"Anzahl Teile: {len(parts)}")
+          info.append(f"Ziel-Zeichen pro Teil: {target_chars}")
+          for idx, part in enumerate(parts, start=1):
+              info.append(f"Teil {idx:03d}: {len(part)} Zeichen")
+          (META_DIR / "aufteilung.txt").write_text("\n".join(info) + "\n", encoding="utf-8")
           PY
 
-      - name: Sprachsynthese mit Piper
+          python3 script_prepare.py
+
+      - name: Audio-Teile erzeugen
+        shell: bash
         run: |
-          mkdir -p chunks_wav
-          count=$(cat chunk_count.txt)
-          for i in $(seq 1 "$count"); do
-            n=$(printf "%02d" "$i")
+          mkdir -p output/audio
+          shopt -s nullglob
+          for txt in output/parts/teil_*.txt; do
+            base=$(basename "$txt" .txt)
+            wav="output/audio/${base}.wav"
+            mp3="output/audio/${base}.mp3"
+
             ./piper/piper \
               --model voices/de_DE-thorsten-high.onnx \
-              --output_file "chunks_wav/chunk_${n}.wav" < "text/chunk_${n}.txt"
+              --output_file "$wav" < "$txt"
+
+            ffmpeg -y -i "$wav" -codec:a libmp3lame -qscale:a 2 "$mp3"
+            rm -f "$wav"
           done
 
-      - name: WAVs zusammenführen und MP3 erzeugen
+      - name: Gesamt-MP3 erzeugen
+        shell: bash
         run: |
-          find chunks_wav -name 'chunk_*.wav' | sort > wav_list.txt
-          awk '{print "file '" $0 "'"}' wav_list.txt > concat_list.txt
-          ffmpeg -f concat -safe 0 -i concat_list.txt -c copy ausgabe.wav
-          ffmpeg -i ausgabe.wav -codec:a libmp3lame -qscale:a 2 hoerbuch.mp3
+          ls output/audio/teil_*.mp3 | sort > output/meta/mp3_list_raw.txt
+          awk '{print "file '\''" $0 "'\''"}' output/meta/mp3_list_raw.txt > output/meta/concat.txt
+          ffmpeg -y -f concat -safe 0 -i output/meta/concat.txt -c copy output/hoerbuch_gesamt.mp3
 
-      - name: MP3 als Release veröffentlichen
+      - name: Dateinamen normalisieren
+        shell: bash
+        run: |
+          mkdir -p release
+          cp output/hoerbuch_gesamt.mp3 "release/00_hoerbuch_gesamt.mp3"
+
+          i=1
+          for f in $(ls output/audio/teil_*.mp3 | sort); do
+            printf -v nr "%03d" "$i"
+            cp "$f" "release/${nr}_$(basename "$f")"
+            i=$((i+1))
+          done
+
+          cp output/meta/aufteilung.txt release/aufteilung.txt
+
+      - name: Release veröffentlichen
         uses: softprops/action-gh-release@v2
         with:
           tag_name: hoerbuch-${{ github.run_id }}
-          files: hoerbuch.mp3
-          body: Automatisch erstelltes Hörbuch
+          name: Hörbuch ${{ github.run_id }}
+          files: |
+            release/*
+          body: |
+            Automatisch erstelltes Hörbuch
+
+            Enthalten:
+            - Gesamtdatei als MP3
+            - Einzelteile als MP3
+            - Textdatei mit Aufteilungsinfo
 
       - name: E-Mail mit Download-Link senden
         uses: dawidd6/action-send-mail@v3
@@ -195,7 +339,16 @@ jobs:
           secure: true
           username: ${{ secrets.GMAIL_USERNAME }}
           password: ${{ secrets.GMAIL_PASSWORD }}
-          subject: Dein fertiges Hörbuch
+          subject: Hörbuch fertig - Run ${{ github.run_id }}
           to: ${{ secrets.RECIPIENT_EMAIL }}
           from: Hörbuch-Bot
-          body: Dein Hörbuch ist fertig. Download hier: https://github.com/${{ github.repository }}/releases/tag/hoerbuch-${{ github.run_id }}
+          body: |
+            Dein Hörbuch ist fertig.
+
+            Download:
+            https://github.com/Melvin-Udall/H-rb-cher/releases/tag/hoerbuch-${{ github.run_id }}
+
+            Enthalten sind:
+            - eine Gesamt-MP3
+            - mehrere Teil-MP3s
+            - eine Datei mit Aufteilungsinformationen
