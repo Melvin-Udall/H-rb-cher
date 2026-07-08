@@ -136,7 +136,10 @@ jobs:
             --output_file teil_${{ matrix.teil }}.wav < text/teil_${{ matrix.teil }}.txt
 
       - name: FFmpeg installieren
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/*microsoft*.list
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
 
       - name: WAV zu MP3 konvertieren
         run: ffmpeg -i teil_${{ matrix.teil }}.wav -codec:a libmp3lame -qscale:a 2 teil_${{ matrix.teil }}.mp3
@@ -159,7 +162,10 @@ jobs:
           path: teile
 
       - name: FFmpeg installieren
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/*microsoft*.list
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
 
       - name: MP3-Teile zusammenfügen
         run: |
