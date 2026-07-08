@@ -12,6 +12,9 @@ on:
           - de
           - en
 
+permissions:
+  contents: write
+
 jobs:
   textaufbereitung:
     runs-on: ubuntu-latest
@@ -51,13 +54,17 @@ jobs:
                   if item.get_type() == ebooklib.ITEM_DOCUMENT:
                       soup = BeautifulSoup(item.get_content(), 'html.parser')
                       teile_html.append(soup.get_text())
-              text = '\n'.join(teile_html)
+              text = '
+'.join(teile_html)
           elif endung == 'pdf':
               import fitz
               doc = fitz.open(pfad)
-              text = '\n'.join(seite.get_text() for seite in doc)
+              text = '
+'.join(seite.get_text() for seite in doc)
 
-          text = re.sub(r'(?<![.!?:])\n(?!\n)', ' ', text)
+          text = re.sub(r'(?<![.!?:])
+(?!
+)', ' ', text)
           text = re.sub(r' +', ' ', text)
 
           saetze = re.split(r'(?<=[.!?]) +', text)
@@ -96,7 +103,8 @@ jobs:
               teile_liste.append(nummer)
 
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              f.write(f'teile={json.dumps(teile_liste)}\n')
+              f.write(f'teile={json.dumps(teile_liste)}
+')
           "
 
       - name: Textteile hochladen
