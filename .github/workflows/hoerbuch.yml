@@ -297,7 +297,7 @@ jobs:
           mp3="output/audio/teil_${{ matrix.teil }}.mp3"
           ./piper/piper \
             --model voices/de_DE-thorsten-high.onnx \
-            --length_scale 1.15 \
+            --length_scale 1.35 \
             --noise_scale 0.667 \
             --noise_w 0.6 \
             --sentence_silence 0.4 \
