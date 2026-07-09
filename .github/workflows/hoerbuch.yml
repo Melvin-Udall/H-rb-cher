@@ -73,7 +73,7 @@ jobs:
               t = t.replace("\u00ad", "")
               t = re.sub(r"[ \t]+", " ", t)
               t = re.sub(r"\n{3,}", "\n\n", t)
-              t = re.sub(r"(?<![.!?:;])\n(?!\n)", " ", t)
+              t = re.sub(r"(?<![.!?:;,])\n(?!\n)", " ", t)
               t = re.sub(r" +", " ", t)
               t = re.sub(r" ?([,;:.!?])", r"\1", t)
               t = re.sub(r"([,;:.!?])([^\s\"'»)\]])", r"\1 \2", t)
@@ -289,6 +289,8 @@ jobs:
           mp3="output/audio/teil_${{ matrix.teil }}.mp3"
           ./piper/piper \
             --model voices/de_DE-thorsten-high.onnx \
+            --length_scale 1.15 \
+            --sentence_silence 0.4 \
             --output_file "$wav" < "$txt"
           ffmpeg -y -i "$wav" -codec:a libmp3lame -qscale:a 2 "$mp3"
           rm -f "$wav"
@@ -335,7 +337,10 @@ jobs:
           ls output/audio/teil_*.mp3 | sort > output/meta/mp3_list_raw.txt
           BASE="$(pwd)"
           awk -v base="$BASE" '{print "file '\''" base "/" $0 "'\''"}' output/meta/mp3_list_raw.txt > output/meta/concat.txt
-          ffmpeg -y -f concat -safe 0 -i output/meta/concat.txt -c copy output/hoerbuch_gesamt.mp3
+          ffmpeg -y -f concat -safe 0 -i output/meta/concat.txt \
+            -metadata comment="Erstellt von Melvin-Udall - H-rb-cher Projekt" \
+            -metadata artist="Melvin-Udall" \
+            -c copy output/hoerbuch_gesamt.mp3
 
       - name: Dateinamen normalisieren
         shell: bash
