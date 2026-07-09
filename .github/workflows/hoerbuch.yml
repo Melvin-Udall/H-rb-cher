@@ -304,6 +304,8 @@ jobs:
     needs: sprachsynthese
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    permissions:
+      contents: write
     steps:
       - name: Repository auschecken
         uses: actions/checkout@v4
