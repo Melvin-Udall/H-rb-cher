@@ -13,18 +13,15 @@ on:
           - en
 
 jobs:
-  build-audiobook:
+  textaufbereitung:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-
+    timeout-minutes: 120
+    outputs:
+      matrix: ${{ steps.prep.outputs.matrix }}
+      anzahl_teile: ${{ steps.prep.outputs.anzahl_teile }}
     steps:
       - name: Repository auschecken
         uses: actions/checkout@v4
-
-      - name: Systempakete installieren
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg wget unzip
 
       - name: Python einrichten
         uses: actions/setup-python@v5
@@ -45,20 +42,8 @@ jobs:
             sacremoses \
             torch
 
-      - name: Piper installieren
-        run: |
-          wget -q https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz
-          tar xzf piper_linux_x86_64.tar.gz
-
-      - name: Thorsten-High-Stimme herunterladen
-        run: |
-          mkdir -p voices
-          wget -q -O voices/de_DE-thorsten-high.onnx \
-            https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx
-          wget -q -O voices/de_DE-thorsten-high.onnx.json \
-            https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx.json
-
       - name: Text extrahieren, übersetzen, glätten und aufteilen
+        id: prep
         shell: bash
         run: |
           cat > script_prepare.py <<'PY'
@@ -66,27 +51,23 @@ jobs:
           import re
           import glob
           import math
+          import json
           from pathlib import Path
-
           QUELLSPRACHE = "${{ github.event.inputs.quellsprache }}".strip().lower()
           TEXT_DIR = Path("text")
           OUT_DIR = Path("output")
           PARTS_DIR = OUT_DIR / "parts"
           META_DIR = OUT_DIR / "meta"
-
           OUT_DIR.mkdir(parents=True, exist_ok=True)
           PARTS_DIR.mkdir(parents=True, exist_ok=True)
           META_DIR.mkdir(parents=True, exist_ok=True)
-
           files = [Path(p) for p in glob.glob("text/buch.*") if not p.endswith(".gitkeep")]
           if not files:
               raise SystemExit("Fehler: Keine Datei text/buch.* gefunden.")
           if len(files) > 1:
               raise SystemExit("Fehler: Mehr als eine Datei text/buch.* gefunden. Bitte nur eine Buchdatei im Ordner text lassen.")
-
           pfad = files[0]
           endung = pfad.suffix.lower()
-
           def clean_text(t: str) -> str:
               t = t.replace("\r\n", "\n").replace("\r", "\n")
               t = t.replace("\u00ad", "")
@@ -100,7 +81,6 @@ jobs:
               t = re.sub(r"\n\s+", "\n", t)
               t = re.sub(r"\n{2,}", "\n\n", t)
               return t.strip()
-
           def read_txt(path: Path) -> str:
               for enc in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
                   try:
@@ -108,12 +88,10 @@ jobs:
                   except Exception:
                       pass
               raise SystemExit("Fehler: TXT-Datei konnte nicht gelesen werden.")
-
           def read_epub(path: Path) -> str:
               from ebooklib import epub
               import ebooklib
               from bs4 import BeautifulSoup
-
               book = epub.read_epub(str(path))
               teile = []
               for item in book.get_items():
@@ -123,7 +101,6 @@ jobs:
                       if text and text.strip():
                           teile.append(text.strip())
               return "\n\n".join(teile)
-
           def read_pdf(path: Path) -> str:
               import fitz
               teile = []
@@ -133,7 +110,6 @@ jobs:
                       if tx and tx.strip():
                           teile.append(tx.strip())
               return "\n\n".join(teile)
-
           if endung == ".txt":
               text = read_txt(pfad)
           elif endung == ".epub":
@@ -142,26 +118,20 @@ jobs:
               text = read_pdf(pfad)
           else:
               raise SystemExit(f"Fehler: Nicht unterstützte Dateiendung: {endung}")
-
           text = clean_text(text)
           if not text or len(text) < 50:
               raise SystemExit("Fehler: Zu wenig lesbarer Text extrahiert.")
-
           if QUELLSPRACHE == "en":
               from transformers import MarianMTModel, MarianTokenizer
-
               modellname = "Helsinki-NLP/opus-mt-en-de"
               tokenizer = MarianTokenizer.from_pretrained(modellname)
               model = MarianMTModel.from_pretrained(modellname)
-
               saetze = re.split(r'(?<=[.!?])\s+', text)
               saetze = [s.strip() for s in saetze if s.strip()]
               uebersetzt = []
-
               batch = []
               batch_chars = 0
               max_batch_chars = 3500
-
               def flush_batch(batch_list):
                   if not batch_list:
                       return []
@@ -174,7 +144,6 @@ jobs:
                   )
                   outputs = model.generate(**inputs, max_length=512)
                   return [tokenizer.decode(o, skip_special_tokens=True) for o in outputs]
-
               for s in saetze:
                   if len(s) > 1800:
                       sub = re.split(r'(?<=[,;:])\s+', s)
@@ -190,31 +159,23 @@ jobs:
                           batch_chars = 0
                       batch.append(piece)
                       batch_chars += len(piece)
-
               if batch:
                   uebersetzt.extend(flush_batch(batch))
-
               text = clean_text(" ".join(uebersetzt))
-
           (TEXT_DIR / "buch_glatt.txt").write_text(text, encoding="utf-8")
-
           total_chars = len(text)
           words = len(re.findall(r"\S+", text))
-
           target_chars_per_part = 90000
           min_chars_per_part = 40000
           max_chars_per_part = 120000
-
           estimated_parts = max(1, math.ceil(total_chars / target_chars_per_part))
+          estimated_parts = min(estimated_parts, 12)
           target_chars = max(min_chars_per_part, min(max_chars_per_part, math.ceil(total_chars / estimated_parts)))
-
           paragraphs = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
           parts = []
           current = []
-
           def current_len(block):
               return sum(len(x) for x in block) + max(0, len(block) - 1) * 2
-
           def split_long_paragraph(par):
               if len(par) <= max_chars_per_part:
                   return [par]
@@ -236,11 +197,9 @@ jobs:
               if cur:
                   chunks.append(" ".join(cur).strip())
               return chunks
-
           normalized_paragraphs = []
           for p in paragraphs:
               normalized_paragraphs.extend(split_long_paragraph(p))
-
           for p in normalized_paragraphs:
               p_len = len(p)
               cur_len = current_len(current)
@@ -249,19 +208,17 @@ jobs:
                   current = [p]
               else:
                   current.append(p)
-
           if current:
               if parts and current_len(current) < min_chars_per_part:
                   parts[-1] = (parts[-1] + "\n\n" + "\n\n".join(current)).strip()
               else:
                   parts.append("\n\n".join(current).strip())
-
           if not parts:
               parts = [text]
-
+          if len(parts) > 12:
+              parts = parts[:12]
           for idx, part in enumerate(parts, start=1):
               (PARTS_DIR / f"teil_{idx:03d}.txt").write_text(part.strip() + "\n", encoding="utf-8")
-
           info = []
           info.append(f"Quelldatei: {pfad.name}")
           info.append(f"Quellsprache: {QUELLSPRACHE}")
@@ -272,33 +229,110 @@ jobs:
           for idx, part in enumerate(parts, start=1):
               info.append(f"Teil {idx:03d}: {len(part)} Zeichen")
           (META_DIR / "aufteilung.txt").write_text("\n".join(info) + "\n", encoding="utf-8")
+          matrix_liste = [f"{i:03d}" for i in range(1, len(parts) + 1)]
+          (META_DIR / "matrix.json").write_text(json.dumps(matrix_liste), encoding="utf-8")
+          (META_DIR / "anzahl.txt").write_text(str(len(parts)), encoding="utf-8")
           PY
-
           python3 script_prepare.py
+          echo "matrix=$(cat output/meta/matrix.json)" >> "$GITHUB_OUTPUT"
+          echo "anzahl_teile=$(cat output/meta/anzahl.txt)" >> "$GITHUB_OUTPUT"
 
-      - name: Audio-Teile erzeugen
+      - name: Textteile als Artefakt hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: text-teile
+          path: |
+            output/parts/
+            output/meta/aufteilung.txt
+          retention-days: 1
+
+  sprachsynthese:
+    needs: textaufbereitung
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: true
+      max-parallel: 6
+      matrix:
+        teil: ${{ fromJson(needs.textaufbereitung.outputs.matrix) }}
+    steps:
+      - name: Systempakete installieren
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg wget
+
+      - name: Textteile herunterladen
+        uses: actions/download-artifact@v4
+        with:
+          name: text-teile
+          path: output
+
+      - name: Piper installieren
+        run: |
+          wget -q https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz
+          tar xzf piper_linux_x86_64.tar.gz
+
+      - name: Thorsten-High-Stimme herunterladen
+        run: |
+          mkdir -p voices
+          wget -q -O voices/de_DE-thorsten-high.onnx \
+            https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx
+          wget -q -O voices/de_DE-thorsten-high.onnx.json \
+            https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx.json
+
+      - name: Audio-Teil erzeugen
         shell: bash
         run: |
           mkdir -p output/audio
-          shopt -s nullglob
-          for txt in output/parts/teil_*.txt; do
-            base=$(basename "$txt" .txt)
-            wav="output/audio/${base}.wav"
-            mp3="output/audio/${base}.mp3"
+          txt="output/parts/teil_${{ matrix.teil }}.txt"
+          wav="output/audio/teil_${{ matrix.teil }}.wav"
+          mp3="output/audio/teil_${{ matrix.teil }}.mp3"
+          ./piper/piper \
+            --model voices/de_DE-thorsten-high.onnx \
+            --output_file "$wav" < "$txt"
+          ffmpeg -y -i "$wav" -codec:a libmp3lame -qscale:a 2 "$mp3"
+          rm -f "$wav"
 
-            ./piper/piper \
-              --model voices/de_DE-thorsten-high.onnx \
-              --output_file "$wav" < "$txt"
+      - name: Audio-Teil als Artefakt hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: audio-teil-${{ matrix.teil }}
+          path: output/audio/teil_${{ matrix.teil }}.mp3
+          retention-days: 1
 
-            ffmpeg -y -i "$wav" -codec:a libmp3lame -qscale:a 2 "$mp3"
-            rm -f "$wav"
-          done
+  zusammenfuegen:
+    needs: sprachsynthese
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Repository auschecken
+        uses: actions/checkout@v4
+
+      - name: Systempakete installieren
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Alle Audio-Teile herunterladen
+        uses: actions/download-artifact@v4
+        with:
+          pattern: audio-teil-*
+          path: output/audio
+          merge-multiple: true
+
+      - name: Aufteilungsinfo herunterladen
+        uses: actions/download-artifact@v4
+        with:
+          name: text-teile
+          path: output
 
       - name: Gesamt-MP3 erzeugen
         shell: bash
         run: |
+          mkdir -p output/meta
           ls output/audio/teil_*.mp3 | sort > output/meta/mp3_list_raw.txt
-          awk '{print "file '\''" $0 "'\''"}' output/meta/mp3_list_raw.txt > output/meta/concat.txt
+          BASE="$(pwd)"
+          awk -v base="$BASE" '{print "file '\''" base "/" $0 "'\''"}' output/meta/mp3_list_raw.txt > output/meta/concat.txt
           ffmpeg -y -f concat -safe 0 -i output/meta/concat.txt -c copy output/hoerbuch_gesamt.mp3
 
       - name: Dateinamen normalisieren
@@ -306,14 +340,12 @@ jobs:
         run: |
           mkdir -p release
           cp output/hoerbuch_gesamt.mp3 "release/00_hoerbuch_gesamt.mp3"
-
           i=1
           for f in $(ls output/audio/teil_*.mp3 | sort); do
             printf -v nr "%03d" "$i"
             cp "$f" "release/${nr}_$(basename "$f")"
             i=$((i+1))
           done
-
           cp output/meta/aufteilung.txt release/aufteilung.txt
 
       - name: Release veröffentlichen
@@ -325,7 +357,6 @@ jobs:
             release/*
           body: |
             Automatisch erstelltes Hörbuch
-
             Enthalten:
             - Gesamtdatei als MP3
             - Einzelteile als MP3
@@ -344,10 +375,8 @@ jobs:
           from: Hörbuch-Bot
           body: |
             Dein Hörbuch ist fertig.
-
             Download:
             https://github.com/Melvin-Udall/H-rb-cher/releases/tag/hoerbuch-${{ github.run_id }}
-
             Enthalten sind:
             - eine Gesamt-MP3
             - mehrere Teil-MP3s
