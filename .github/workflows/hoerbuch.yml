@@ -298,6 +298,8 @@ jobs:
           ./piper/piper \
             --model voices/de_DE-thorsten-high.onnx \
             --length_scale 1.15 \
+            --noise_scale 0.5 \
+            --noise_w 0.45 \
             --sentence_silence 0.4 \
             --output_file "$wav" < "$txt"
           ffmpeg -y -i "$wav" -codec:a libmp3lame -qscale:a 2 "$mp3"
