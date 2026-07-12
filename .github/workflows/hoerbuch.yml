@@ -334,7 +334,7 @@ jobs:
           absaetze = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
 
           if len(absaetze) < 2:
-              flach = " ".join(t.split("\n"))
+              flach = " ".join(text.split("\n"))
               alle_saetze = re.split(r'(?<=[.!?])\s+', flach)
               alle_saetze = [s.strip() for s in alle_saetze if s.strip()]
               absaetze = []
