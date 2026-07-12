@@ -11,11 +11,19 @@ on:
         options:
           - de
           - en
+      text_ueberarbeiten:
+        description: "Text vor Vertonung mit Gemini sprachlich glätten"
+        required: true
+        default: "ja"
+        type: choice
+        options:
+          - ja
+          - nein
 
 jobs:
   textaufbereitung:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
     outputs:
       matrix: ${{ steps.prep.outputs.matrix }}
       anzahl_teile: ${{ steps.prep.outputs.anzahl_teile }}
@@ -40,34 +48,30 @@ jobs:
             transformers \
             sentencepiece \
             sacremoses \
-            torch
+            torch \
+            google-generativeai
 
-      - name: Text extrahieren, übersetzen, glätten und aufteilen
-        id: prep
+      - name: Text extrahieren und vorbereiten
         shell: bash
         run: |
-          cat > script_prepare.py <<'PY'
-          import os
+          cat > script_extract.py <<'PY'
           import re
           import glob
-          import math
-          import json
           from pathlib import Path
+
           QUELLSPRACHE = "${{ github.event.inputs.quellsprache }}".strip().lower()
           TEXT_DIR = Path("text")
-          OUT_DIR = Path("output")
-          PARTS_DIR = OUT_DIR / "parts"
-          META_DIR = OUT_DIR / "meta"
-          OUT_DIR.mkdir(parents=True, exist_ok=True)
-          PARTS_DIR.mkdir(parents=True, exist_ok=True)
-          META_DIR.mkdir(parents=True, exist_ok=True)
+          TEXT_DIR.mkdir(parents=True, exist_ok=True)
+
           files = [Path(p) for p in glob.glob("text/buch.*") if not p.endswith(".gitkeep")]
           if not files:
               raise SystemExit("Fehler: Keine Datei text/buch.* gefunden.")
           if len(files) > 1:
               raise SystemExit("Fehler: Mehr als eine Datei text/buch.* gefunden. Bitte nur eine Buchdatei im Ordner text lassen.")
+
           pfad = files[0]
           endung = pfad.suffix.lower()
+
           def clean_text(t: str) -> str:
               t = t.replace("\r\n", "\n").replace("\r", "\n")
               t = t.replace("\u00ad", "")
@@ -76,11 +80,12 @@ jobs:
               t = re.sub(r"(?<![.!?:;,])\n(?!\n)", " ", t)
               t = re.sub(r" +", " ", t)
               t = re.sub(r" ?([,;:.!?])", r"\1", t)
-              t = re.sub(r"([,;:.!?])([^\s\"'»)\]])", r"\1 \2", t)
+              t = re.sub(r"([,;:.!?])([^\s\"'»)\\]])", r"\1 \2", t)
               t = re.sub(r"\s+\n", "\n", t)
               t = re.sub(r"\n\s+", "\n", t)
               t = re.sub(r"\n{2,}", "\n\n", t)
               return t.strip()
+
           def read_txt(path: Path) -> str:
               for enc in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
                   try:
@@ -88,6 +93,7 @@ jobs:
                   except Exception:
                       pass
               raise SystemExit("Fehler: TXT-Datei konnte nicht gelesen werden.")
+
           def read_epub(path: Path) -> str:
               from ebooklib import epub
               import ebooklib
@@ -101,6 +107,7 @@ jobs:
                       if text and text.strip():
                           teile.append(text.strip())
               return "\n\n".join(teile)
+
           def read_pdf(path: Path) -> str:
               import fitz
               teile = []
@@ -110,6 +117,7 @@ jobs:
                       if tx and tx.strip():
                           teile.append(tx.strip())
               return "\n\n".join(teile)
+
           if endung == ".txt":
               text = read_txt(pfad)
           elif endung == ".epub":
@@ -118,9 +126,11 @@ jobs:
               text = read_pdf(pfad)
           else:
               raise SystemExit(f"Fehler: Nicht unterstützte Dateiendung: {endung}")
+
           text = clean_text(text)
           if not text or len(text) < 50:
               raise SystemExit("Fehler: Zu wenig lesbarer Text extrahiert.")
+
           if QUELLSPRACHE == "en":
               from transformers import MarianMTModel, MarianTokenizer
               modellname = "Helsinki-NLP/opus-mt-en-de"
@@ -132,6 +142,7 @@ jobs:
               batch = []
               batch_chars = 0
               max_batch_chars = 3500
+
               def flush_batch(batch_list):
                   if not batch_list:
                       return []
@@ -144,6 +155,7 @@ jobs:
                   )
                   outputs = model.generate(**inputs, max_length=512)
                   return [tokenizer.decode(o, skip_special_tokens=True) for o in outputs]
+
               for s in saetze:
                   if len(s) > 1800:
                       sub = re.split(r'(?<=[,;:])\s+', s)
@@ -159,23 +171,169 @@ jobs:
                           batch_chars = 0
                       batch.append(piece)
                       batch_chars += len(piece)
+
               if batch:
                   uebersetzt.extend(flush_batch(batch))
+
               text = clean_text(" ".join(uebersetzt))
+
           (TEXT_DIR / "buch_glatt.txt").write_text(text, encoding="utf-8")
+          PY
+          python3 script_extract.py
+
+      - name: Text mit Gemini sprachlich glätten
+        if: ${{ github.event.inputs.text_ueberarbeiten == 'ja' }}
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        shell: bash
+        run: |
+          cat > script_gemini_rewrite.py <<'PY'
+          import os
+          import re
+          import time
+          from pathlib import Path
+          import google.generativeai as genai
+
+          api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+          if not api_key:
+              raise SystemExit("Fehler: GitHub-Secret GEMINI_API_KEY fehlt oder ist leer.")
+
+          genai.configure(api_key=api_key)
+          model = genai.GenerativeModel("gemini-2.5-flash")
+
+          text_path = Path("text/buch_glatt.txt")
+          text = text_path.read_text(encoding="utf-8")
+
+          paragraphs = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
+          chunks = []
+          current = []
+          current_words = 0
+          target_words = 2200
+
+          def word_count(s: str) -> int:
+              return len(re.findall(r"\S+", s))
+
+          for p in paragraphs:
+              w = word_count(p)
+              if current and current_words + w > target_words:
+                  chunks.append("\n\n".join(current).strip())
+                  current = [p]
+                  current_words = w
+              else:
+                  current.append(p)
+                  current_words += w
+          if current:
+              chunks.append("\n\n".join(current).strip())
+
+          prompt_prefix = (
+              "Überarbeite den folgenden deutschen Buchtext ausschließlich für Text-to-Speech.\n"
+              "Regeln:\n"
+              "1. Sehr lange Sätze mit mehreren Nebensätzen in kürzere, einfachere Hauptsätze aufteilen.\n"
+              "2. Doppelpunkte, die einen neuen Hauptsatz einleiten, wenn sinnvoll in Punkt plus neuen Satz umwandeln.\n"
+              "3. Eingeschobene Nebensätze zwischen Gedankenstrichen auflösen oder glätten.\n"
+              "4. Keine inhaltlichen Kürzungen, keine Zusammenfassung, keine Auslassungen.\n"
+              "5. Bedeutung, Reihenfolge der Informationen und Absatzstruktur beibehalten.\n"
+              "6. Nur den überarbeiteten Text ausgeben, keine Kommentare, keine Überschrift, keine Erklärung.\n\n"
+              "TEXT:\n\n"
+          )
+
+          out_chunks = []
+          report_lines = [f"Chunks gesamt: {len(chunks)}"]
+          failed = []
+
+          for idx, chunk in enumerate(chunks, start=1):
+              success = False
+              chunk_words = word_count(chunk)
+
+              for attempt in range(1, 5):
+                  try:
+                      response = model.generate_content(
+                          prompt_prefix + chunk,
+                          generation_config={
+                              "temperature": 0.2,
+                              "max_output_tokens": 8192
+                          }
+                      )
+                      result = (response.text or "").strip()
+
+                      if not result:
+                          raise ValueError("Leere Antwort")
+
+                      result_words = word_count(result)
+
+                      if result_words < int(chunk_words * 0.75):
+                          raise ValueError(
+                              f"Antwort zu kurz: Original {chunk_words} Wörter, Ergebnis {result_words} Wörter"
+                          )
+
+                      out_chunks.append(result)
+                      report_lines.append(
+                          f"Chunk {idx:03d}: OK | Original {chunk_words} Wörter | Ergebnis {result_words} Wörter"
+                      )
+                      success = True
+                      break
+
+                  except Exception as e:
+                      if attempt < 4:
+                          time.sleep(8 * attempt)
+                      last_error = str(e)
+
+              if not success:
+                  out_chunks.append(chunk)
+                  failed.append(idx)
+                  report_lines.append(
+                      f"Chunk {idx:03d}: FEHLER -> Original übernommen | {last_error}"
+                  )
+
+              time.sleep(2)
+
+          rewritten = "\n\n".join(out_chunks).strip() + "\n"
+          text_path.write_text(rewritten, encoding="utf-8")
+
+          meta_dir = Path("output/meta")
+          meta_dir.mkdir(parents=True, exist_ok=True)
+          report_lines.append(f"Fehlgeschlagene Chunks: {failed}")
+          (meta_dir / "glaettung_info.txt").write_text("\n".join(report_lines) + "\n", encoding="utf-8")
+          PY
+          python3 script_gemini_rewrite.py
+
+      - name: Text aufteilen
+        id: prep
+        shell: bash
+        run: |
+          cat > script_prepare.py <<'PY'
+          import re
+          import math
+          import json
+          from pathlib import Path
+
+          OUT_DIR = Path("output")
+          PARTS_DIR = OUT_DIR / "parts"
+          META_DIR = OUT_DIR / "meta"
+          OUT_DIR.mkdir(parents=True, exist_ok=True)
+          PARTS_DIR.mkdir(parents=True, exist_ok=True)
+          META_DIR.mkdir(parents=True, exist_ok=True)
+
+          text = Path("text/buch_glatt.txt").read_text(encoding="utf-8")
+
           total_chars = len(text)
           words = len(re.findall(r"\S+", text))
+
           target_chars_per_part = 90000
           min_chars_per_part = 40000
           max_chars_per_part = 120000
+
           estimated_parts = max(1, math.ceil(total_chars / target_chars_per_part))
           estimated_parts = min(estimated_parts, 12)
           target_chars = max(min_chars_per_part, min(max_chars_per_part, math.ceil(total_chars / estimated_parts)))
+
           paragraphs = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
           parts = []
           current = []
+
           def current_len(block):
               return sum(len(x) for x in block) + max(0, len(block) - 1) * 2
+
           def split_long_paragraph(par):
               if len(par) <= max_chars_per_part:
                   return [par]
@@ -197,9 +355,11 @@ jobs:
               if cur:
                   chunks.append(" ".join(cur).strip())
               return chunks
+
           normalized_paragraphs = []
           for p in paragraphs:
               normalized_paragraphs.extend(split_long_paragraph(p))
+
           for p in normalized_paragraphs:
               p_len = len(p)
               cur_len = current_len(current)
@@ -208,34 +368,41 @@ jobs:
                   current = [p]
               else:
                   current.append(p)
+
           if current:
               if parts and current_len(current) < min_chars_per_part:
                   parts[-1] = (parts[-1] + "\n\n" + "\n\n".join(current)).strip()
               else:
                   parts.append("\n\n".join(current).strip())
+
           if not parts:
               parts = [text]
+
           if len(parts) > 12:
               parts = parts[:12]
+
           for idx, part in enumerate(parts, start=1):
               (PARTS_DIR / f"teil_{idx:03d}.txt").write_text(part.strip() + "\n", encoding="utf-8")
+
           info = []
-          info.append(f"Quelldatei: {pfad.name}")
-          info.append(f"Quellsprache: {QUELLSPRACHE}")
           info.append(f"Zeichen gesamt: {total_chars}")
           info.append(f"Wörter gesamt: {words}")
           info.append(f"Anzahl Teile: {len(parts)}")
           info.append(f"Ziel-Zeichen pro Teil: {target_chars}")
           for idx, part in enumerate(parts, start=1):
               info.append(f"Teil {idx:03d}: {len(part)} Zeichen")
+
           (META_DIR / "aufteilung.txt").write_text("\n".join(info) + "\n", encoding="utf-8")
+
           vorschau = []
           for idx, part in enumerate(parts, start=1):
               woerter = re.findall(r"\S+", part)
               erste5 = " ".join(woerter[:5])
               letzte5 = " ".join(woerter[-5:]) if len(woerter) >= 5 else " ".join(woerter)
               vorschau.append(f"Teil {idx:03d}: [{erste5}] ... [{letzte5}]")
+
           (META_DIR / "textvorschau.txt").write_text("\n".join(vorschau) + "\n", encoding="utf-8")
+
           matrix_liste = [f"{i:03d}" for i in range(1, len(parts) + 1)]
           (META_DIR / "matrix.json").write_text(json.dumps(matrix_liste), encoding="utf-8")
           (META_DIR / "anzahl.txt").write_text(str(len(parts)), encoding="utf-8")
@@ -252,6 +419,7 @@ jobs:
             output/parts/
             output/meta/aufteilung.txt
             output/meta/textvorschau.txt
+            output/meta/glaettung_info.txt
           retention-days: 1
 
   sprachsynthese:
@@ -297,7 +465,7 @@ jobs:
           mp3="output/audio/teil_${{ matrix.teil }}.mp3"
           ./piper/piper \
             --model voices/de_DE-thorsten-high.onnx \
-            --length_scale 1.15 \
+            --length_scale 1.27 \
             --noise_scale 0.5 \
             --noise_w 0.45 \
             --sentence_silence 0.4 \
@@ -365,6 +533,9 @@ jobs:
           done
           cp output/meta/aufteilung.txt release/aufteilung.txt
           cp output/meta/textvorschau.txt release/textvorschau.txt
+          if [ -f output/meta/glaettung_info.txt ]; then
+            cp output/meta/glaettung_info.txt release/glaettung_info.txt
+          fi
 
       - name: Release veröffentlichen
         uses: softprops/action-gh-release@v2
@@ -379,6 +550,8 @@ jobs:
             - Gesamtdatei als MP3
             - Einzelteile als MP3
             - Textdatei mit Aufteilungsinfo
+            - Textvorschau
+            - Glättungsinfo (falls Gemini aktiviert war)
 
       - name: E-Mail mit Download-Link senden
         uses: dawidd6/action-send-mail@v3
@@ -399,3 +572,5 @@ jobs:
             - eine Gesamt-MP3
             - mehrere Teil-MP3s
             - eine Datei mit Aufteilungsinformationen
+            - eine Textvorschau
+            - optional eine Glättungsinfo
