@@ -228,12 +228,16 @@ jobs:
           prompt_prefix = (
               "Überarbeite den folgenden deutschen Buchtext ausschließlich für Text-to-Speech.\n"
               "Regeln:\n"
-              "1. Sehr lange Sätze mit mehreren Nebensätzen in kürzere, einfachere Hauptsätze aufteilen.\n"
+              "1. Sehr lange Sätze mit mehreren Nebensätzen in kürzere, einfachere Hauptsätze aufteilen. "
+              "Kein Satz darf länger als 25 Wörter sein.\n"
               "2. Doppelpunkte, die einen neuen Hauptsatz einleiten, wenn sinnvoll in Punkt plus neuen Satz umwandeln.\n"
               "3. Eingeschobene Nebensätze zwischen Gedankenstrichen auflösen oder glätten.\n"
-              "4. Keine inhaltlichen Kürzungen, keine Zusammenfassung, keine Auslassungen.\n"
-              "5. Bedeutung, Reihenfolge der Informationen und Absatzstruktur beibehalten.\n"
-              "6. Nur den überarbeiteten Text ausgeben, keine Kommentare, keine Überschrift, keine Erklärung.\n\n"
+              "4. Nur Standard-Satzzeichen verwenden: Punkt, Komma, Fragezeichen, Ausrufezeichen. "
+              "Keine Gedankenstriche, Semikolons, Klammern, Auslassungspunkte oder Sonderzeichen im Fließtext.\n"
+              "5. Zahlen als Ziffern beibehalten, aber niemals mehrere Satzzeichen direkt aneinanderreihen.\n"
+              "6. Keine inhaltlichen Kürzungen, keine Zusammenfassung, keine Auslassungen.\n"
+              "7. Bedeutung, Reihenfolge der Informationen und Absatzstruktur beibehalten.\n"
+              "8. Nur den überarbeiteten Text ausgeben, keine Kommentare, keine Überschrift, keine Erklärung.\n\n"
               "TEXT:\n\n"
           )
 
@@ -296,6 +300,73 @@ jobs:
           (meta_dir / "glaettung_info.txt").write_text("\n".join(report_lines) + "\n", encoding="utf-8")
           PY
           python3 script_gemini_rewrite.py
+
+      - name: Text final für Piper härten
+        shell: bash
+        run: |
+          cat > script_harden.py <<'PY'
+          import re
+          from pathlib import Path
+
+          text_path = Path("text/buch_glatt.txt")
+          text = text_path.read_text(encoding="utf-8")
+
+          def harden_text(t: str) -> str:
+              t = t.replace("–", ",").replace("—", ",")
+              t = t.replace("„", '"').replace("“", '"').replace("‚", "'").replace("‘", "'")
+              t = t.replace("…", ".")
+              t = re.sub(r"[;:]", ".", t)
+              t = re.sub(r"\(([^)]*)\)", r", \1,", t)
+              t = re.sub(r"[\[\]{}]", "", t)
+              t = re.sub(r"[.]{2,}", ".", t)
+              t = re.sub(r"[,]{2,}", ",", t)
+              t = re.sub(r"\s*([.,!?])\s*([.,!?])", r"\1", t)
+              t = re.sub(r"([.,!?])\1+", r"\1", t)
+              t = re.sub(r"[ \t]+", " ", t)
+              t = re.sub(r" ,", ",", t)
+              t = re.sub(r" \.", ".", t)
+              return t.strip()
+
+          text = harden_text(text)
+
+          absaetze = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
+          neue_absaetze = []
+          max_woerter_pro_satz = 25
+
+          for absatz in absaetze:
+              saetze = re.split(r'(?<=[.!?])\s+', absatz)
+              neue_saetze = []
+              for satz in saetze:
+                  woerter = satz.split()
+                  if len(woerter) <= max_woerter_pro_satz:
+                      neue_saetze.append(satz)
+                      continue
+                  teile = re.split(r',\s+', satz)
+                  aktuell = []
+                  aktuell_woerter = 0
+                  for teil in teile:
+                      teil_woerter = len(teil.split())
+                      if aktuell and aktuell_woerter + teil_woerter > max_woerter_pro_satz:
+                          satzteil = ", ".join(aktuell).strip()
+                          if satzteil and not satzteil[-1] in ".!?":
+                              satzteil += "."
+                          neue_saetze.append(satzteil)
+                          aktuell = [teil]
+                          aktuell_woerter = teil_woerter
+                      else:
+                          aktuell.append(teil)
+                          aktuell_woerter += teil_woerter
+                  if aktuell:
+                      satzteil = ", ".join(aktuell).strip()
+                      if satzteil and not satzteil[-1] in ".!?":
+                          satzteil += "."
+                      neue_saetze.append(satzteil)
+              neue_absaetze.append(" ".join(neue_saetze))
+
+          text = "\n\n".join(neue_absaetze).strip() + "\n"
+          text_path.write_text(text, encoding="utf-8")
+          PY
+          python3 script_harden.py
 
       - name: Text aufteilen
         id: prep
