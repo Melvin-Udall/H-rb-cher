@@ -235,9 +235,11 @@ jobs:
               "4. Nur Standard-Satzzeichen verwenden: Punkt, Komma, Fragezeichen, Ausrufezeichen. "
               "Keine Gedankenstriche, Semikolons, Klammern, Auslassungspunkte oder Sonderzeichen im Fließtext.\n"
               "5. Zahlen als Ziffern beibehalten, aber niemals mehrere Satzzeichen direkt aneinanderreihen.\n"
-              "6. Keine inhaltlichen Kürzungen, keine Zusammenfassung, keine Auslassungen.\n"
-              "7. Bedeutung, Reihenfolge der Informationen und Absatzstruktur beibehalten.\n"
-              "8. Nur den überarbeiteten Text ausgeben, keine Kommentare, keine Überschrift, keine Erklärung.\n\n"
+              "6. Absatzstruktur beibehalten: Jeder inhaltliche Absatz aus dem Originaltext bleibt ein eigener Absatz, "
+              "getrennt durch eine komplett leere Zeile. Absätze niemals zusammenführen.\n"
+              "7. Keine inhaltlichen Kürzungen, keine Zusammenfassung, keine Auslassungen.\n"
+              "8. Bedeutung und Reihenfolge der Informationen beibehalten.\n"
+              "9. Nur den überarbeiteten Text ausgeben, keine Kommentare, keine Überschrift, keine Erklärung.\n\n"
               "TEXT:\n\n"
           )
 
@@ -330,6 +332,21 @@ jobs:
           text = harden_text(text)
 
           absaetze = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
+
+          if len(absaetze) < 2:
+              flach = " ".join(t.split("\n"))
+              alle_saetze = re.split(r'(?<=[.!?])\s+', flach)
+              alle_saetze = [s.strip() for s in alle_saetze if s.strip()]
+              absaetze = []
+              gruppe = []
+              for s in alle_saetze:
+                  gruppe.append(s)
+                  if len(gruppe) >= 5:
+                      absaetze.append(" ".join(gruppe))
+                      gruppe = []
+              if gruppe:
+                  absaetze.append(" ".join(gruppe))
+
           alle_zeilen = []
           max_woerter_pro_satz = 25
 
@@ -400,49 +417,47 @@ jobs:
           estimated_parts = min(estimated_parts, 12)
           target_chars = max(min_chars_per_part, min(max_chars_per_part, math.ceil(total_chars / estimated_parts)))
 
-          bloecke = [b for b in text.split("\n") ]
-          gruppen = []
-          aktuelle_gruppe = []
-          for zeile in bloecke:
-              if zeile.strip() == "":
-                  if aktuelle_gruppe:
-                      gruppen.append(aktuelle_gruppe)
-                      aktuelle_gruppe = []
-              else:
-                  aktuelle_gruppe.append(zeile)
-          if aktuelle_gruppe:
-              gruppen.append(aktuelle_gruppe)
+          lines = text.split("\n")
 
           parts = []
           current_lines = []
+          cur_len = 0
 
-          def block_len(lines):
-              return sum(len(x) + 1 for x in lines)
-
-          for gruppe in gruppen:
-              gruppe_len = block_len(gruppe)
-              cur_len = block_len(current_lines)
-              if current_lines and cur_len + gruppe_len > target_chars and cur_len >= min_chars_per_part:
+          for line in lines:
+              current_lines.append(line)
+              cur_len += len(line) + 1
+              is_blank = (line.strip() == "")
+              erreicht_ziel = cur_len >= target_chars
+              erreicht_max = cur_len >= max_chars_per_part
+              if (erreicht_ziel and is_blank) or erreicht_max:
                   parts.append(current_lines)
-                  current_lines = list(gruppe) + [""]
-              else:
-                  current_lines.extend(gruppe)
-                  current_lines.append("")
+                  current_lines = []
+                  cur_len = 0
 
           if current_lines:
-              if parts and block_len(current_lines) < min_chars_per_part:
+              rest_len = sum(len(x) + 1 for x in current_lines)
+              if parts and rest_len < min_chars_per_part:
                   parts[-1].extend(current_lines)
               else:
                   parts.append(current_lines)
 
           if not parts:
-              parts = [bloecke]
+              parts = [lines]
 
           if len(parts) > 12:
-              parts = parts[:12]
+              zusammengefasst = parts[:11]
+              rest = parts[11:]
+              rest_lines = []
+              for p in rest:
+                  rest_lines.extend(p)
+              zusammengefasst.append(rest_lines)
+              parts = zusammengefasst
 
-          for idx, lines in enumerate(parts, start=1):
-              inhalt = "\n".join(lines).strip() + "\n"
+          def block_len(block_lines):
+              return sum(len(x) + 1 for x in block_lines)
+
+          for idx, block_lines in enumerate(parts, start=1):
+              inhalt = "\n".join(block_lines).strip() + "\n"
               (PARTS_DIR / f"teil_{idx:03d}.txt").write_text(inhalt, encoding="utf-8")
 
           info = []
@@ -450,14 +465,14 @@ jobs:
           info.append(f"Wörter gesamt: {words}")
           info.append(f"Anzahl Teile: {len(parts)}")
           info.append(f"Ziel-Zeichen pro Teil: {target_chars}")
-          for idx, lines in enumerate(parts, start=1):
-              info.append(f"Teil {idx:03d}: {block_len(lines)} Zeichen")
+          for idx, block_lines in enumerate(parts, start=1):
+              info.append(f"Teil {idx:03d}: {block_len(block_lines)} Zeichen")
 
           (META_DIR / "aufteilung.txt").write_text("\n".join(info) + "\n", encoding="utf-8")
 
           vorschau = []
-          for idx, lines in enumerate(parts, start=1):
-              teil_text = " ".join(lines)
+          for idx, block_lines in enumerate(parts, start=1):
+              teil_text = " ".join(block_lines)
               woerter = re.findall(r"\S+", teil_text)
               erste5 = " ".join(woerter[:5])
               letzte5 = " ".join(woerter[-5:]) if len(woerter) >= 5 else " ".join(woerter)
