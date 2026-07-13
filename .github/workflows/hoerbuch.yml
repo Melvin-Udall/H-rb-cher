@@ -347,18 +347,49 @@ jobs:
               if gruppe:
                   absaetze.append(" ".join(gruppe))
 
-          alle_zeilen = []
           max_woerter_pro_satz = 25
+          min_woerter_pro_zeile = 6
+
+          def zeilen_zusammenfuehren(zeilen):
+              if not zeilen:
+                  return zeilen
+              ergebnis = []
+              puffer = ""
+              for zeile in zeilen:
+                  if not puffer:
+                      puffer = zeile
+                  else:
+                      puffer = puffer.rstrip()
+                      if puffer and puffer[-1] not in ".!?":
+                          puffer += "."
+                      puffer = puffer + " " + zeile
+                  woerter_puffer = len(puffer.split())
+                  if woerter_puffer >= min_woerter_pro_zeile:
+                      ergebnis.append(puffer)
+                      puffer = ""
+              if puffer:
+                  if ergebnis:
+                      letzte = ergebnis.pop()
+                      letzte = letzte.rstrip()
+                      if letzte and letzte[-1] not in ".!?":
+                          letzte += "."
+                      ergebnis.append(letzte + " " + puffer)
+                  else:
+                      ergebnis.append(puffer)
+              return ergebnis
+
+          alle_zeilen = []
 
           for absatz in absaetze:
               saetze = re.split(r'(?<=[.!?])\s+', absatz)
+              zeilen_absatz = []
               for satz in saetze:
                   satz = satz.strip()
                   if not satz:
                       continue
                   woerter = satz.split()
                   if len(woerter) <= max_woerter_pro_satz:
-                      alle_zeilen.append(satz)
+                      zeilen_absatz.append(satz)
                       continue
                   teile = re.split(r',\s+', satz)
                   aktuell = []
@@ -369,7 +400,7 @@ jobs:
                           satzteil = ", ".join(aktuell).strip()
                           if satzteil and satzteil[-1] not in ".!?":
                               satzteil += "."
-                          alle_zeilen.append(satzteil)
+                          zeilen_absatz.append(satzteil)
                           aktuell = [teil]
                           aktuell_woerter = teil_woerter
                       else:
@@ -379,7 +410,10 @@ jobs:
                       satzteil = ", ".join(aktuell).strip()
                       if satzteil and satzteil[-1] not in ".!?":
                           satzteil += "."
-                      alle_zeilen.append(satzteil)
+                      zeilen_absatz.append(satzteil)
+
+              zeilen_absatz = zeilen_zusammenfuehren(zeilen_absatz)
+              alle_zeilen.extend(zeilen_absatz)
               alle_zeilen.append("")
 
           text = "\n".join(alle_zeilen).strip() + "\n"
