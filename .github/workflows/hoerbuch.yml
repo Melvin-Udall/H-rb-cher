@@ -230,16 +230,18 @@ jobs:
               "Regeln:\n"
               "1. Sehr lange Sätze mit mehreren Nebensätzen in kürzere, einfachere Hauptsätze aufteilen. "
               "Kein Satz darf länger als 20 Wörter sein.\n"
-              "2. Doppelpunkte, die einen neuen Hauptsatz einleiten, wenn sinnvoll in Punkt plus neuen Satz umwandeln.\n"
-              "3. Eingeschobene Nebensätze zwischen Gedankenstrichen auflösen oder glätten.\n"
-              "4. Nur Standard-Satzzeichen verwenden: Punkt, Komma, Fragezeichen, Ausrufezeichen. "
+              "2. Sehr kurze Sätze (unter 5 Wörter) mit dem vorherigen oder nächsten Satz sinnvoll verbinden.\n"
+              "3. Doppelpunkte, die einen neuen Hauptsatz einleiten, wenn sinnvoll in Punkt plus neuen Satz umwandeln.\n"
+              "4. Eingeschobene Nebensätze zwischen Gedankenstrichen auflösen oder glätten.\n"
+              "5. Nur Standard-Satzzeichen verwenden: Punkt, Komma, Fragezeichen, Ausrufezeichen. "
               "Keine Gedankenstriche, Semikolons, Klammern, Auslassungspunkte oder Sonderzeichen im Fließtext.\n"
-              "5. Zahlen als Ziffern beibehalten, aber niemals mehrere Satzzeichen direkt aneinanderreihen.\n"
-              "6. Absatzstruktur beibehalten: Jeder inhaltliche Absatz aus dem Originaltext bleibt ein eigener Absatz, "
+              "6. Zahlen als Ziffern beibehalten, aber niemals mehrere Satzzeichen direkt aneinanderreihen.\n"
+              "7. Abkürzungen wie z.B., u.a., etc. ausschreiben, damit keine Punkt-Kürzel entstehen.\n"
+              "8. Absatzstruktur beibehalten: Jeder inhaltliche Absatz aus dem Originaltext bleibt ein eigener Absatz, "
               "getrennt durch eine komplett leere Zeile. Absätze niemals zusammenführen.\n"
-              "7. Keine inhaltlichen Kürzungen, keine Zusammenfassung, keine Auslassungen.\n"
-              "8. Bedeutung und Reihenfolge der Informationen beibehalten.\n"
-              "9. Nur den überarbeiteten Text ausgeben, keine Kommentare, keine Überschrift, keine Erklärung.\n\n"
+              "9. Keine inhaltlichen Kürzungen, keine Zusammenfassung, keine Auslassungen.\n"
+              "10. Bedeutung und Reihenfolge der Informationen beibehalten.\n"
+              "11. Nur den überarbeiteten Text ausgeben, keine Kommentare, keine Überschrift, keine Erklärung.\n\n"
               "TEXT:\n\n"
           )
 
@@ -313,10 +315,25 @@ jobs:
           text_path = Path("text/buch_glatt.txt")
           text = text_path.read_text(encoding="utf-8")
 
-          def harden_text(t: str) -> list:
+          def grundhaertung(t: str) -> str:
               t = t.replace("–", ",").replace("—", ",")
               t = t.replace("„", '"').replace("“", '"').replace("‚", "'").replace("‘", "'")
               t = t.replace("…", ".")
+              abkuerzungen = {
+                  r"\bz\.B\.": "zum Beispiel",
+                  r"\bu\.a\.": "unter anderem",
+                  r"\betc\.": "und so weiter",
+                  r"\bd\.h\.": "das heißt",
+                  r"\bbzw\.": "beziehungsweise",
+                  r"\bggf\.": "gegebenenfalls",
+                  r"\busw\.": "und so weiter",
+                  r"\bca\.": "circa",
+                  r"\bNr\.": "Nummer",
+                  r"\bDr\.": "Doktor",
+                  r"\bProf\.": "Professor",
+              }
+              for muster, ersatz in abkuerzungen.items():
+                  t = re.sub(muster, ersatz, t)
               t = re.sub(r"[;:]", ".", t)
               t = re.sub(r"\(([^)]*)\)", r", \1,", t)
               t = re.sub(r"[\[\]{}]", "", t)
@@ -327,19 +344,27 @@ jobs:
               t = re.sub(r"[ \t]+", " ", t)
               t = re.sub(r" ,", ",", t)
               t = re.sub(r" \.", ".", t)
-              absaetze = [p.strip() for p in re.split(r"\n{2,}", t) if p.strip()]
-              ergebnis = []
-              for absatz in absaetze:
-                  absatz = re.sub(r"\n", " ", absatz)
-                  absatz = re.sub(r" +", " ", absatz).strip()
-                  ergebnis.append(absatz)
-              return ergebnis
+              return t
 
-          absaetze = harden_text(text)
+          text = grundhaertung(text)
 
+          absaetze = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
+          absaetze_flach = []
+          for absatz in absaetze:
+              absatz = re.sub(r"\n", " ", absatz)
+              absatz = re.sub(r" +", " ", absatz).strip()
+              absaetze_flach.append(absatz)
+
+          MIN_ZEICHEN = 40
           MAX_ZEICHEN = 100
 
-          def satz_in_stuecke_teilen(satz: str, max_z: int) -> list:
+          def stelle_satzzeichen_sicher(s: str) -> str:
+              s = s.strip()
+              if s and s[-1] not in ".!?":
+                  s += "."
+              return s
+
+          def teile_zu_langen_satz(satz: str, max_z: int) -> list:
               if len(satz) <= max_z:
                   return [satz]
               teile = re.split(r',\s+', satz)
@@ -351,9 +376,7 @@ jobs:
                       aktuell = kandidat
                   else:
                       if aktuell:
-                          if not aktuell.rstrip().endswith(('.', '!', '?')):
-                              aktuell = aktuell.rstrip() + "."
-                          ergebnis.append(aktuell)
+                          ergebnis.append(stelle_satzzeichen_sicher(aktuell))
                       if len(teil) > max_z:
                           woerter = teil.split()
                           zeile = ""
@@ -363,39 +386,69 @@ jobs:
                                   zeile = kandidat2
                               else:
                                   if zeile:
-                                      if not zeile.rstrip().endswith(('.', '!', '?')):
-                                          zeile = zeile.rstrip() + "."
-                                      ergebnis.append(zeile)
+                                      ergebnis.append(stelle_satzzeichen_sicher(zeile))
                                   zeile = w
-                          if zeile:
-                              aktuell = zeile
-                          else:
-                              aktuell = ""
+                          aktuell = zeile
                       else:
                           aktuell = teil
               if aktuell:
-                  if not aktuell.rstrip().endswith(('.', '!', '?')):
-                      aktuell = aktuell.rstrip() + "."
-                  ergebnis.append(aktuell)
-              return ergebnis if ergebnis else [satz[:max_z] + "."]
+                  ergebnis.append(stelle_satzzeichen_sicher(aktuell))
+              return ergebnis if ergebnis else [stelle_satzzeichen_sicher(satz[:max_z])]
 
-          alle_saetze = []
+          def fuehre_kurze_saetze_zusammen(saetze: list, min_z: int, max_z: int) -> list:
+              ergebnis = []
+              puffer = ""
+              for satz in saetze:
+                  if not puffer:
+                      puffer = satz
+                  else:
+                      kandidat = puffer.rstrip()
+                      if kandidat and kandidat[-1] not in ".!?":
+                          kandidat += "."
+                      kandidat = kandidat + " " + satz
+                      if len(kandidat) <= max_z:
+                          puffer = kandidat
+                      else:
+                          ergebnis.append(stelle_satzzeichen_sicher(puffer))
+                          puffer = satz
+                  if len(puffer) >= min_z:
+                      ergebnis.append(stelle_satzzeichen_sicher(puffer))
+                      puffer = ""
+              if puffer:
+                  if ergebnis and len(puffer) < min_z:
+                      letzter = ergebnis.pop()
+                      letzter_ohne_punkt = letzter.rstrip()
+                      if letzter_ohne_punkt and letzter_ohne_punkt[-1] not in ".!?":
+                          letzter_ohne_punkt += "."
+                      zusammen = letzter_ohne_punkt + " " + puffer
+                      if len(zusammen) <= max_z * 1.5:
+                          ergebnis.append(stelle_satzzeichen_sicher(zusammen))
+                      else:
+                          ergebnis.append(letzter)
+                          ergebnis.append(stelle_satzzeichen_sicher(puffer))
+                  else:
+                      ergebnis.append(stelle_satzzeichen_sicher(puffer))
+              return ergebnis
 
-          for absatz in absaetze:
+          alle_zeilen = []
+
+          for absatz in absaetze_flach:
               roh_saetze = re.split(r'(?<=[.!?])\s+', absatz)
+              roh_saetze = [s.strip() for s in roh_saetze if s.strip()]
+
+              zwischenschritt = []
               for satz in roh_saetze:
-                  satz = satz.strip()
-                  if not satz:
-                      continue
-                  if not satz[-1] in '.!?':
-                      satz += "."
-                  stuecke = satz_in_stuecke_teilen(satz, MAX_ZEICHEN)
-                  alle_saetze.extend(stuecke)
-              alle_saetze.append("")
+                  satz = stelle_satzzeichen_sicher(satz)
+                  zwischenschritt.extend(teile_zu_langen_satz(satz, MAX_ZEICHEN))
+
+              zusammengefuehrt = fuehre_kurze_saetze_zusammen(zwischenschritt, MIN_ZEICHEN, MAX_ZEICHEN)
+
+              alle_zeilen.extend(zusammengefuehrt)
+              alle_zeilen.append("")
 
           bereinigt = []
           letzte_war_leer = False
-          for z in alle_saetze:
+          for z in alle_zeilen:
               if z == "":
                   if not letzte_war_leer:
                       bereinigt.append("")
@@ -413,12 +466,7 @@ jobs:
           text_path.write_text(ausgabe, encoding="utf-8")
 
           nicht_leer = [z for z in bereinigt if z]
-          zu_lang = [z for z in nicht_leer if len(z) > MAX_ZEICHEN]
           print(f"Zeilen gesamt: {len(nicht_leer)}")
-          print(f"Zeilen > {MAX_ZEICHEN} Zeichen: {len(zu_lang)}")
-          if zu_lang:
-              for z in zu_lang[:5]:
-                  print(f"  WARNUNG: {len(z)} Zeichen: {z[:80]}...")
           PY
           python3 script_harden.py
 
@@ -568,25 +616,206 @@ jobs:
           wget -q -O voices/de_DE-thorsten-high.onnx.json \
             https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx.json
 
-      - name: Audio-Teil erzeugen
+      - name: Audio-Teil erzeugen mit automatischer Qualitätsprüfung
         shell: bash
         run: |
-          mkdir -p output/audio
-          TEIL="${{ matrix.teil }}"
-          TXT="output/parts/teil_${TEIL}.txt"
-          WAV="output/audio/teil_${TEIL}.wav"
-          MP3="output/audio/teil_${TEIL}.mp3"
+          mkdir -p output/audio output/meta
+          cat > script_synthese.py <<'PY'
+          import subprocess
+          import sys
+          import wave
+          import array
+          import math
+          from pathlib import Path
 
-          ./piper/piper \
-            --model voices/de_DE-thorsten-high.onnx \
-            --length_scale 1.20 \
-            --noise_scale 0.667 \
-            --noise_w 0.8 \
-            --sentence_silence 0.35 \
-            --output_file "$WAV" < "$TXT"
+          TEIL = sys.argv[1]
+          TXT_PATH = Path(f"output/parts/teil_{TEIL}.txt")
+          VOICE = "voices/de_DE-thorsten-high.onnx"
+          RAW_WAV = Path(f"output/audio/teil_{TEIL}_raw.wav")
+          FINAL_WAV = Path(f"output/audio/teil_{TEIL}.wav")
+          FINAL_MP3 = Path(f"output/audio/teil_{TEIL}.mp3")
+          REPORT = Path(f"output/meta/qualitaet_teil_{TEIL}.txt")
 
-          ffmpeg -y -i "$WAV" -codec:a libmp3lame -qscale:a 2 "$MP3"
-          rm -f "$WAV"
+          BASE_PARAMS = ["--length_scale", "1.20", "--noise_scale", "0.667",
+                         "--noise_w", "0.8", "--sentence_silence", "0.35"]
+
+          lines = [l.strip() for l in TXT_PATH.read_text(encoding="utf-8").split("\n") if l.strip()]
+
+          def run_piper(text, out_wav, params):
+              proc = subprocess.run(
+                  ["./piper/piper", "--model", VOICE, *params, "--output_file", str(out_wav)],
+                  input=text.encode("utf-8"), capture_output=True
+              )
+              return proc.returncode == 0 and out_wav.exists() and out_wav.stat().st_size > 0
+
+          def read_wav_samples(path):
+              with wave.open(str(path), "rb") as w:
+                  n = w.getnframes()
+                  sr = w.getframerate()
+                  sw = w.getsampwidth()
+                  ch = w.getnchannels()
+                  raw = w.readframes(n)
+              if sw == 2:
+                  samples = array.array("h", raw)
+              else:
+                  samples = array.array("b", raw)
+              if ch > 1:
+                  samples = samples[::ch]
+              return samples, sr
+
+          def write_wav_samples(path, samples, sr):
+              with wave.open(str(path), "wb") as w:
+                  w.setnchannels(1)
+                  w.setsampwidth(2)
+                  w.setframerate(sr)
+                  w.writeframes(array.array("h", samples).tobytes())
+
+          def rms_windows(samples, sr, window_ms=20):
+              win = max(1, int(sr * window_ms / 1000))
+              energies = []
+              for i in range(0, max(0, len(samples) - win), win):
+                  chunk = samples[i:i + win]
+                  s = sum(x * x for x in chunk) / len(chunk)
+                  energies.append(math.sqrt(s))
+              return energies, win
+
+          def find_boundaries(samples, sr, n_segments):
+              energies, win = rms_windows(samples, sr)
+              if not energies:
+                  return []
+              max_e = max(energies) or 1
+              threshold = max_e * 0.02
+              silence_runs = []
+              run_start = None
+              for idx, e in enumerate(energies):
+                  if e < threshold:
+                      if run_start is None:
+                          run_start = idx
+                  else:
+                      if run_start is not None:
+                          silence_runs.append((run_start, idx))
+                          run_start = None
+              if run_start is not None:
+                  silence_runs.append((run_start, len(energies)))
+              silence_runs.sort(key=lambda r: r[1] - r[0], reverse=True)
+              needed = max(0, n_segments - 1)
+              chosen = sorted(silence_runs[:needed], key=lambda r: r[0])
+              return [int(((a + b) / 2) * win) for a, b in chosen]
+
+          def segment_audio(samples, boundaries):
+              segs = []
+              prev = 0
+              for b in boundaries:
+                  segs.append(samples[prev:b])
+                  prev = b
+              segs.append(samples[prev:])
+              return segs
+
+          MAX_CHARS_PRO_SEK = 17.0
+          MIN_CHARS_PRO_SEK_CHECK = 4.0
+
+          report_lines = [f"Teil {TEIL}: {len(lines)} Zeilen"]
+
+          if not run_piper("\n".join(lines), RAW_WAV, BASE_PARAMS):
+              print(f"FEHLER: Grundsynthese fehlgeschlagen fuer Teil {TEIL}", file=sys.stderr)
+              sys.exit(1)
+
+          samples, sr = read_wav_samples(RAW_WAV)
+          boundaries = find_boundaries(samples, sr, len(lines))
+          segments = segment_audio(samples, boundaries)
+
+          if len(segments) != len(lines):
+              report_lines.append(
+                  f"WARNUNG: Segmentanzahl ({len(segments)}) != Zeilenanzahl ({len(lines)}). "
+                  f"Automatische Einzelpruefung fuer diesen Teil uebersprungen, Originalaudio wird verwendet."
+              )
+              write_wav_samples(FINAL_WAV, samples, sr)
+          else:
+              fixed_segments = []
+              anzahl_fixes = 0
+              for idx, (line, seg) in enumerate(zip(lines, segments), start=1):
+                  dauer = len(seg) / sr if sr else 0
+                  chars = len(line)
+                  rate = chars / dauer if dauer > 0 else 999
+                  ok = (dauer > 0) and (rate <= MAX_CHARS_PRO_SEK) and (rate >= MIN_CHARS_PRO_SEK_CHECK or chars < 20)
+
+                  if ok:
+                      fixed_segments.append(seg)
+                      continue
+
+                  anzahl_fixes += 1
+                  report_lines.append(
+                      f"Zeile {idx:04d} auffaellig: {chars} Zeichen, {dauer:.2f}s, "
+                      f"{rate:.1f} Zeichen/Sek -> {line[:70]}"
+                  )
+
+                  geloest = False
+                  versuche = [
+                      ["--length_scale", "1.20", "--noise_scale", "0.667", "--noise_w", "0.8", "--sentence_silence", "0.35"],
+                      ["--length_scale", "1.35", "--noise_scale", "0.667", "--noise_w", "0.8", "--sentence_silence", "0.35"],
+                      ["--length_scale", "1.50", "--noise_scale", "0.667", "--noise_w", "0.9", "--sentence_silence", "0.35"],
+                  ]
+                  tmp_wav = Path(f"output/audio/fix_{TEIL}_{idx:04d}.wav")
+
+                  for v_idx, params in enumerate(versuche, start=1):
+                      if run_piper(line, tmp_wav, params):
+                          fix_samples, fix_sr = read_wav_samples(tmp_wav)
+                          fix_dauer = len(fix_samples) / fix_sr if fix_sr else 0
+                          fix_rate = chars / fix_dauer if fix_dauer > 0 else 999
+                          if fix_dauer > 0 and fix_rate <= MAX_CHARS_PRO_SEK:
+                              fixed_segments.append(fix_samples)
+                              report_lines.append(
+                                  f"  -> behoben in Versuch {v_idx} ({fix_dauer:.2f}s, {fix_rate:.1f} Zeichen/Sek)"
+                              )
+                              geloest = True
+                              tmp_wav.unlink(missing_ok=True)
+                              break
+                      tmp_wav.unlink(missing_ok=True)
+
+                  if not geloest:
+                      woerter = line.split()
+                      if len(woerter) >= 4:
+                          mitte = len(woerter) // 2
+                          teil_a = " ".join(woerter[:mitte])
+                          teil_b = " ".join(woerter[mitte:])
+                          erfolge = []
+                          for t in (teil_a, teil_b):
+                              tmp2 = Path(f"output/audio/fixsplit_{TEIL}_{idx:04d}_{len(erfolge)}.wav")
+                              if run_piper(t, tmp2, versuche[1]):
+                                  s2, sr2 = read_wav_samples(tmp2)
+                                  erfolge.append(s2)
+                              tmp2.unlink(missing_ok=True)
+                          if len(erfolge) == 2:
+                              fixed_segments.append(erfolge[0])
+                              fixed_segments.append(erfolge[1])
+                              report_lines.append("  -> in zwei Haelften aufgeteilt und einzeln synthetisiert")
+                              geloest = True
+
+                  if not geloest:
+                      fixed_segments.append(seg)
+                      report_lines.append("  -> keine Verbesserung erreicht, Original-Segment beibehalten")
+
+              zusammengefuegt = array.array("h")
+              pause_samples = array.array("h", [0]) * int(sr * 0.35)
+              for i, seg in enumerate(fixed_segments):
+                  zusammengefuegt.extend(seg)
+                  if i < len(fixed_segments) - 1:
+                      zusammengefuegt.extend(pause_samples)
+
+              write_wav_samples(FINAL_WAV, zusammengefuegt, sr)
+              report_lines.append(f"Anzahl automatisch korrigierter Zeilen: {anzahl_fixes}")
+
+          Path("output/meta").mkdir(parents=True, exist_ok=True)
+          REPORT.write_text("\n".join(report_lines) + "\n", encoding="utf-8")
+
+          subprocess.run(
+              ["ffmpeg", "-y", "-i", str(FINAL_WAV), "-codec:a", "libmp3lame", "-qscale:a", "2", str(FINAL_MP3)],
+              capture_output=True
+          )
+          RAW_WAV.unlink(missing_ok=True)
+          FINAL_WAV.unlink(missing_ok=True)
+          PY
+          python3 script_synthese.py "${{ matrix.teil }}"
 
       - name: Audio-Teil als Artefakt hochladen
         uses: actions/upload-artifact@v4
@@ -594,6 +823,13 @@ jobs:
           name: audio-teil-${{ matrix.teil }}
           path: output/audio/teil_${{ matrix.teil }}.mp3
           retention-days: 1
+
+      - name: Qualitätsbericht als Artefakt hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: qualitaet-teil-${{ matrix.teil }}
+          path: output/meta/qualitaet_teil_${{ matrix.teil }}.txt
+          retention-days: 7
 
   zusammenfuegen:
     needs: sprachsynthese
@@ -617,11 +853,23 @@ jobs:
           path: output/audio
           merge-multiple: true
 
+      - name: Alle Qualitätsberichte herunterladen
+        uses: actions/download-artifact@v4
+        with:
+          pattern: qualitaet-teil-*
+          path: output/meta
+          merge-multiple: true
+
       - name: Aufteilungsinfo herunterladen
         uses: actions/download-artifact@v4
         with:
           name: text-teile
           path: output
+
+      - name: Gesamt-Qualitätsbericht zusammenfassen
+        shell: bash
+        run: |
+          cat output/meta/qualitaet_teil_*.txt > output/meta/qualitaet_gesamt.txt 2>/dev/null || true
 
       - name: Gesamt-MP3 erzeugen
         shell: bash
@@ -651,6 +899,9 @@ jobs:
           if [ -f output/meta/glaettung_info.txt ]; then
             cp output/meta/glaettung_info.txt release/glaettung_info.txt
           fi
+          if [ -f output/meta/qualitaet_gesamt.txt ]; then
+            cp output/meta/qualitaet_gesamt.txt release/qualitaet_gesamt.txt
+          fi
 
       - name: Release veröffentlichen
         uses: softprops/action-gh-release@v2
@@ -667,6 +918,7 @@ jobs:
             - Textdatei mit Aufteilungsinfo
             - Textvorschau
             - Glättungsinfo (falls Gemini aktiviert war)
+            - Qualitätsbericht (automatisch erkannte und korrigierte Stellen)
 
       - name: E-Mail mit Download-Link senden
         uses: dawidd6/action-send-mail@v3
@@ -689,3 +941,4 @@ jobs:
             - eine Datei mit Aufteilungsinformationen
             - eine Textvorschau
             - optional eine Glättungsinfo
+            - ein Qualitätsbericht mit automatisch erkannten und korrigierten Stellen
