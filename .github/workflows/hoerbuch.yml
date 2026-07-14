@@ -164,16 +164,10 @@ jobs:
           from pathlib import Path
           import google.generativeai as genai
 
-          # ---------------------------------------------------------------
-          # Modell: gemini-2.0-flash-lite (kostenlos, Free Tier)
-          # Free-Tier-Limits: 30 RPM / 1.000.000 TPM / 1.500 RPD
-          # Drosselung: 6s Pause zwischen Chunks = max. 10 Anfragen/Min
-          # Chunk-Größe: 400 Wörter (~600-700 Tokens) pro Anfrage
-          # ---------------------------------------------------------------
-          MODELL          = "gemini-2.0-flash-lite"
+          MODELL = "gemini-2.0-flash-lite"
           CHUNK_MAX_WOERTER = 400
-          PAUSE_ZWISCHEN_CHUNKS = 6      # Sekunden; hält RPM weit unter 30
-          RETRY_PAUSEN    = [30, 60, 120] # Sekunden bei 429-Fehler (3 Versuche)
+          PAUSE_ZWISCHEN_CHUNKS = 6
+          RETRY_PAUSEN = [30, 60, 120]
 
           api_key = os.environ.get("GEMINI_API_KEY", "").strip()
           if not api_key:
@@ -187,7 +181,6 @@ jobs:
 
           def wc(s): return len(re.findall(r"\S+", s))
 
-          # Absätze zu Chunks von max. CHUNK_MAX_WOERTER Wörtern zusammenfassen
           chunks, current, cur_w = [], [], 0
           for p in paragraphs:
               w = wc(p)
@@ -246,7 +239,6 @@ jobs:
                   failed.append(idx)
                   report.append(f"Chunk {idx:04d}: ALLE VERSUCHE FEHLGESCHLAGEN -> Original übernommen")
 
-              # Feste Pause nach jedem Chunk (auch nach Erfolg)
               if idx < len(chunks):
                   time.sleep(PAUSE_ZWISCHEN_CHUNKS)
 
@@ -268,9 +260,9 @@ jobs:
           text = text_path.read_text(encoding="utf-8")
 
           def grundhaertung(t):
-              t = t.replace("–", ",").replace("—", ",")
-              t = t.replace("„", '"').replace(""", '"').replace("‚", "'").replace("'", "'")
-              t = t.replace("…", ".")
+              t = t.replace("\u2013", ",").replace("\u2014", ",")
+              t = t.replace("\u201e", '"').replace("\u201c", '"').replace("\u201a", "'").replace("\u2018", "'").replace("\u2019", "'")
+              t = t.replace("\u2026", ".")
               for muster, ersatz in {
                   r"\bz\.B\.": "zum Beispiel", r"\bu\.a\.": "unter anderem",
                   r"\betc\.": "und so weiter", r"\bd\.h\.": "das heißt",
@@ -416,7 +408,6 @@ jobs:
                   parts.append(current)
           if not parts: parts = [lines]
 
-          # Sicherheitsprüfung: verhindert den "1-Teil-Bug" aus früheren Läufen
           groesster_teil = max(sum(len(x)+1 for x in p) for p in parts)
           if len(parts) < 2 and total_chars > max_c:
               raise SystemExit(
