@@ -164,11 +164,22 @@ jobs:
           from pathlib import Path
           import google.generativeai as genai
 
+          # ---------------------------------------------------------------
+          # Modell: gemini-2.0-flash-lite (kostenlos, Free Tier)
+          # Free-Tier-Limits: 30 RPM / 1.000.000 TPM / 1.500 RPD
+          # Drosselung: 6s Pause zwischen Chunks = max. 10 Anfragen/Min
+          # Chunk-Größe: 400 Wörter (~600-700 Tokens) pro Anfrage
+          # ---------------------------------------------------------------
+          MODELL          = "gemini-2.0-flash-lite"
+          CHUNK_MAX_WOERTER = 400
+          PAUSE_ZWISCHEN_CHUNKS = 6      # Sekunden; hält RPM weit unter 30
+          RETRY_PAUSEN    = [30, 60, 120] # Sekunden bei 429-Fehler (3 Versuche)
+
           api_key = os.environ.get("GEMINI_API_KEY", "").strip()
           if not api_key:
               raise SystemExit("Fehler: GEMINI_API_KEY fehlt.")
           genai.configure(api_key=api_key)
-          model = genai.GenerativeModel("gemini-2.5-flash")
+          model = genai.GenerativeModel(MODELL)
 
           text_path = Path("text/buch_glatt.txt")
           text = text_path.read_text(encoding="utf-8")
@@ -176,10 +187,11 @@ jobs:
 
           def wc(s): return len(re.findall(r"\S+", s))
 
+          # Absätze zu Chunks von max. CHUNK_MAX_WOERTER Wörtern zusammenfassen
           chunks, current, cur_w = [], [], 0
           for p in paragraphs:
               w = wc(p)
-              if current and cur_w + w > 2200:
+              if current and cur_w + w > CHUNK_MAX_WOERTER:
                   chunks.append("\n\n".join(current)); current, cur_w = [p], w
               else:
                   current.append(p); cur_w += w
@@ -198,15 +210,23 @@ jobs:
               "TEXT:\n\n"
           )
 
-          out_chunks, report, failed = [], [f"Chunks gesamt: {len(chunks)}"], []
+          out_chunks, report, failed = [], [f"Modell: {MODELL}", f"Chunks gesamt: {len(chunks)}",
+                                             f"Chunk-Grenze: {CHUNK_MAX_WOERTER} Wörter",
+                                             f"Pause zwischen Chunks: {PAUSE_ZWISCHEN_CHUNKS}s"], []
+
           for idx, chunk in enumerate(chunks, start=1):
               chunk_words = wc(chunk)
               success = False
-              for attempt in range(1, 5):
+              last_err = ""
+
+              for attempt, wartezeit in enumerate([0] + RETRY_PAUSEN, start=1):
+                  if wartezeit > 0:
+                      report.append(f"Chunk {idx:04d}: Wartezeit {wartezeit}s vor Versuch {attempt}...")
+                      time.sleep(wartezeit)
                   try:
                       resp = model.generate_content(
                           prompt_prefix + chunk,
-                          generation_config={"temperature": 0.2, "max_output_tokens": 8192}
+                          generation_config={"temperature": 0.2, "max_output_tokens": 4096}
                       )
                       result = (resp.text or "").strip()
                       if not result:
@@ -214,19 +234,25 @@ jobs:
                       if wc(result) < int(chunk_words * 0.75):
                           raise ValueError(f"zu kurz: {chunk_words} -> {wc(result)}")
                       out_chunks.append(result)
-                      report.append(f"Chunk {idx:03d}: OK ({chunk_words} -> {wc(result)} Wörter)")
+                      report.append(f"Chunk {idx:04d}: OK ({chunk_words} -> {wc(result)} Wörter)")
                       success = True
                       break
                   except Exception as e:
-                      if attempt < 4: time.sleep(8 * attempt)
                       last_err = str(e)
+                      report.append(f"Chunk {idx:04d}: Versuch {attempt} fehlgeschlagen: {last_err[:120]}")
+
               if not success:
-                  out_chunks.append(chunk); failed.append(idx)
-                  report.append(f"Chunk {idx:03d}: FEHLER -> Original übernommen | {last_err}")
-              time.sleep(2)
+                  out_chunks.append(chunk)
+                  failed.append(idx)
+                  report.append(f"Chunk {idx:04d}: ALLE VERSUCHE FEHLGESCHLAGEN -> Original übernommen")
+
+              # Feste Pause nach jedem Chunk (auch nach Erfolg)
+              if idx < len(chunks):
+                  time.sleep(PAUSE_ZWISCHEN_CHUNKS)
 
           text_path.write_text("\n\n".join(out_chunks).strip() + "\n", encoding="utf-8")
-          report.append(f"Fehlgeschlagene Chunks: {failed}")
+          report.append(f"\nFehlgeschlagene Chunks: {failed if failed else 'keine'}")
+          report.append(f"Erfolgreich: {len(chunks) - len(failed)} / {len(chunks)}")
           Path("output/meta/02_glaettung.txt").write_text("\n".join(report) + "\n", encoding="utf-8")
           PY
           python3 script_gemini_rewrite.py
@@ -243,7 +269,7 @@ jobs:
 
           def grundhaertung(t):
               t = t.replace("–", ",").replace("—", ",")
-              t = t.replace("„", '"').replace("“", '"').replace("‚", "'").replace("‘", "'")
+              t = t.replace("„", '"').replace(""", '"').replace("‚", "'").replace("'", "'")
               t = t.replace("…", ".")
               for muster, ersatz in {
                   r"\bz\.B\.": "zum Beispiel", r"\bu\.a\.": "unter anderem",
