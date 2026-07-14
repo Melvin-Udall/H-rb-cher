@@ -12,7 +12,7 @@ on:
           - de
           - en
       text_ueberarbeiten:
-        description: "Text vor Vertonung mit Gemini sprachlich glätten"
+        description: "Text vor Vertonung mit Grok sprachlich glätten"
         required: true
         default: "ja"
         type: choice
@@ -40,7 +40,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install --no-cache-dir \
             ebooklib beautifulsoup4 pymupdf pdfplumber lxml \
-            transformers sentencepiece sacremoses torch google-generativeai
+            transformers sentencepiece sacremoses torch openai
 
       - name: Text extrahieren und vorbereiten
         shell: bash
@@ -153,27 +153,26 @@ jobs:
           PY
           python3 script_extract.py
 
-      - name: Text mit Gemini sprachlich glätten
+      - name: Text mit Grok sprachlich glätten
         if: ${{ github.event.inputs.text_ueberarbeiten == 'ja' }}
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
         shell: bash
         run: |
-          cat > script_gemini_rewrite.py <<'PY'
+          cat > script_grok_rewrite.py <<'PY'
           import os, re, time
           from pathlib import Path
-          import google.generativeai as genai
+          from openai import OpenAI
 
-          MODELL = "gemini-2.0-flash-lite"
-          CHUNK_MAX_WOERTER = 400
-          PAUSE_ZWISCHEN_CHUNKS = 6
-          RETRY_PAUSEN = [30, 60, 120]
+          MODELL = "grok-4-fast"
+          CHUNK_MAX_WOERTER = 1500
+          PAUSE_ZWISCHEN_CHUNKS = 2
+          RETRY_PAUSEN = [15, 30, 60]
 
-          api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+          api_key = os.environ.get("XAI_API_KEY", "").strip()
           if not api_key:
-              raise SystemExit("Fehler: GEMINI_API_KEY fehlt.")
-          genai.configure(api_key=api_key)
-          model = genai.GenerativeModel(MODELL)
+              raise SystemExit("Fehler: XAI_API_KEY fehlt.")
+          client = OpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
 
           text_path = Path("text/buch_glatt.txt")
           text = text_path.read_text(encoding="utf-8")
@@ -190,7 +189,7 @@ jobs:
                   current.append(p); cur_w += w
           if current: chunks.append("\n\n".join(current))
 
-          prompt_prefix = (
+          system_prompt = (
               "Überarbeite den folgenden deutschen Buchtext ausschließlich für Text-to-Speech.\n"
               "Regeln:\n"
               "1. Lange Sätze in kürzere Hauptsätze aufteilen (max 20 Wörter).\n"
@@ -199,8 +198,8 @@ jobs:
               "4. Gedankenstrich-Einschübe auflösen.\n"
               "5. Nur Punkt, Komma, Fragezeichen, Ausrufezeichen verwenden.\n"
               "6. Abkürzungen wie z.B., u.a., etc. ausschreiben.\n"
-              "7. Absatzstruktur beibehalten, keine Kürzungen, keine Kommentare.\n\n"
-              "TEXT:\n\n"
+              "7. Absatzstruktur beibehalten, keine Kürzungen, keine Kommentare.\n"
+              "8. Gib ausschließlich den überarbeiteten Text zurück, keine Einleitung."
           )
 
           out_chunks, report, failed = [], [f"Modell: {MODELL}", f"Chunks gesamt: {len(chunks)}",
@@ -217,11 +216,16 @@ jobs:
                       report.append(f"Chunk {idx:04d}: Wartezeit {wartezeit}s vor Versuch {attempt}...")
                       time.sleep(wartezeit)
                   try:
-                      resp = model.generate_content(
-                          prompt_prefix + chunk,
-                          generation_config={"temperature": 0.2, "max_output_tokens": 4096}
+                      resp = client.chat.completions.create(
+                          model=MODELL,
+                          messages=[
+                              {"role": "system", "content": system_prompt},
+                              {"role": "user", "content": chunk},
+                          ],
+                          temperature=0.2,
+                          max_tokens=8192,
                       )
-                      result = (resp.text or "").strip()
+                      result = (resp.choices[0].message.content or "").strip()
                       if not result:
                           raise ValueError("Leere Antwort")
                       if wc(result) < int(chunk_words * 0.75):
@@ -232,7 +236,7 @@ jobs:
                       break
                   except Exception as e:
                       last_err = str(e)
-                      report.append(f"Chunk {idx:04d}: Versuch {attempt} fehlgeschlagen: {last_err[:120]}")
+                      report.append(f"Chunk {idx:04d}: Versuch {attempt} fehlgeschlagen: {last_err[:150]}")
 
               if not success:
                   out_chunks.append(chunk)
@@ -247,7 +251,7 @@ jobs:
           report.append(f"Erfolgreich: {len(chunks) - len(failed)} / {len(chunks)}")
           Path("output/meta/02_glaettung.txt").write_text("\n".join(report) + "\n", encoding="utf-8")
           PY
-          python3 script_gemini_rewrite.py
+          python3 script_grok_rewrite.py
 
       - name: Text für Piper härten
         shell: bash
@@ -259,7 +263,23 @@ jobs:
           text_path = Path("text/buch_glatt.txt")
           text = text_path.read_text(encoding="utf-8")
 
+          def entferne_quellenverweise(t):
+              t = re.sub(r"[\u00b9\u00b2\u00b3\u2070\u2074-\u2079]+", "", t)
+              t = re.sub(r"\[\s*\d+(?:\s*,\s*S\.?\s*\d+)?\s*\]", "", t)
+              zitat_muster = (
+                  r"\((?:[^()]|\([^()]*\))*?"
+                  r"(?:vgl\.|Vgl\.|ebd\.|Ebd\.|zit\.\s*nach|Zit\.\s*nach|"
+                  r"Hervorhebung|Anm\.|S\.\s?\d+|Bd\.\s?\d+|Nr\.\s?\d+|"
+                  r"Abb\.\s?\d+|Tab\.\s?\d+|et\s?al\.|f{1,2}\.)"
+                  r"(?:[^()]|\([^()]*\))*?\)"
+              )
+              t = re.sub(zitat_muster, "", t, flags=re.IGNORECASE)
+              t = re.sub(r"[ \t]{2,}", " ", t)
+              t = re.sub(r"\s+([.,!?])", r"\1", t)
+              return t
+
           def grundhaertung(t):
+              t = entferne_quellenverweise(t)
               t = t.replace("\u2013", ",").replace("\u2014", ",")
               t = t.replace("\u201e", '"').replace("\u201c", '"').replace("\u201a", "'").replace("\u2018", "'").replace("\u2019", "'")
               t = t.replace("\u2026", ".")
@@ -290,32 +310,38 @@ jobs:
 
           def satzzeichen(s):
               s = s.strip()
-              if s and s[-1] not in ".!?": s += "."
+              if s and s[-1] not in ".!?,":
+                  s += "."
               return s
 
           def teile_lang(satz, max_z):
               if len(satz) <= max_z: return [satz]
-              teile = re.split(r',\s+', satz)
+              endzeichen = satz[-1] if satz and satz[-1] in ".!?" else "."
+              kern = satz[:-1] if satz and satz[-1] in ".!?" else satz
+              teile = re.split(r',\s+', kern)
               erg, akt = [], ""
               for teil in teile:
                   kand = akt + (", " if akt else "") + teil
                   if len(kand) <= max_z:
                       akt = kand
                   else:
-                      if akt: erg.append(satzzeichen(akt))
+                      if akt: erg.append(akt.strip() + ",")
                       if len(teil) > max_z:
                           woerter, zeile = teil.split(), ""
                           for w in woerter:
                               k2 = zeile + (" " if zeile else "") + w
                               if len(k2) <= max_z: zeile = k2
                               else:
-                                  if zeile: erg.append(satzzeichen(zeile))
+                                  if zeile: erg.append(zeile.strip() + ",")
                                   zeile = w
                           akt = zeile
                       else:
                           akt = teil
-              if akt: erg.append(satzzeichen(akt))
-              return erg if erg else [satzzeichen(satz[:max_z])]
+              if akt:
+                  erg.append(akt.strip() + endzeichen)
+              elif erg:
+                  erg[-1] = erg[-1].rstrip(",") + endzeichen
+              return erg if erg else [satz[:max_z] + endzeichen]
 
           def fuehre_zusammen(saetze, min_z, max_z):
               erg, puf = [], ""
@@ -324,7 +350,7 @@ jobs:
                       puf = satz
                   else:
                       k = puf.rstrip()
-                      if k and k[-1] not in ".!?": k += "."
+                      if k and k[-1] not in ".!?,": k += "."
                       k = k + " " + satz
                       if len(k) <= max_z:
                           puf = k
@@ -336,7 +362,7 @@ jobs:
                   if erg and len(puf) < min_z:
                       letzter = erg.pop()
                       lo = letzter.rstrip()
-                      if lo and lo[-1] not in ".!?": lo += "."
+                      if lo and lo[-1] not in ".!?,": lo += "."
                       zus = lo + " " + puf
                       if len(zus) <= max_z * 1.5:
                           erg.append(satzzeichen(zus))
@@ -370,7 +396,8 @@ jobs:
           Path("output/meta/03_haertung.txt").write_text(
               f"Zeilen nach Haertung: {len(nicht_leer)}\n"
               f"Zeilen unter {MIN_Z} Zeichen: {sum(1 for z in nicht_leer if len(z) < MIN_Z)}\n"
-              f"Zeilen ueber {MAX_Z} Zeichen: {sum(1 for z in nicht_leer if len(z) > MAX_Z)}\n",
+              f"Zeilen ueber {MAX_Z} Zeichen: {sum(1 for z in nicht_leer if len(z) > MAX_Z)}\n"
+              f"Zeilen mit technischem Komma-Split (statt Punkt): {sum(1 for z in nicht_leer if z.endswith(','))}\n",
               encoding="utf-8"
           )
           PY
@@ -498,6 +525,8 @@ jobs:
               ["--length_scale", "1.50", "--noise_scale", "0.667", "--noise_w", "0.9", "--sentence_silence", "0.35"],
           ]
           MAX_CHARS_PRO_SEK = 22.0
+          PAUSE_SATZENDE = 0.35
+          PAUSE_KOMMA_SPLIT = 0.15
 
           lines = [l.strip() for l in TXT.read_text(encoding="utf-8").split("\n") if l.strip()]
 
@@ -518,6 +547,7 @@ jobs:
 
           report = [f"Teil {TEIL}: {len(lines)} Zeilen"]
           fixes = 0
+          komma_splits = 0
           all_samples, sr_final = array.array("h"), 22050
 
           for idx, line in enumerate(lines, start=1):
@@ -545,7 +575,12 @@ jobs:
 
               sr_final = beste_sr
               all_samples.extend(beste_samples)
-              all_samples.extend(array.array("h", [0]) * int(sr_final * 0.35))
+
+              ist_komma_split = line.rstrip().endswith(",")
+              pause = PAUSE_KOMMA_SPLIT if ist_komma_split else PAUSE_SATZENDE
+              if ist_komma_split:
+                  komma_splits += 1
+              all_samples.extend(array.array("h", [0]) * int(sr_final * pause))
 
               if beste_rate > MAX_CHARS_PRO_SEK:
                   report.append(f"Zeile {idx:05d}: weiterhin auffaellig ({beste_rate:.1f} Zeichen/Sek) -> {line[:60]}")
@@ -555,6 +590,7 @@ jobs:
               w.writeframes(all_samples.tobytes())
 
           report.append(f"Anzahl automatisch korrigierter Zeilen: {fixes}")
+          report.append(f"Anzahl Komma-Split-Zeilen (kuerzere Pause 0.15s): {komma_splits}")
           REPORT.write_text("\n".join(report) + "\n", encoding="utf-8")
 
           subprocess.run(
@@ -624,7 +660,7 @@ jobs:
             echo "--- 1. Textextraktion ---"
             cat output/meta/01_extraktion.txt 2>/dev/null || echo "(kein Bericht vorhanden)"
             echo
-            echo "--- 2. Sprachliche Glaettung (Gemini) ---"
+            echo "--- 2. Sprachliche Glaettung (Grok) ---"
             cat output/meta/02_glaettung.txt 2>/dev/null || echo "(nicht aktiviert oder kein Bericht)"
             echo
             echo "--- 3. Haertung fuer Piper ---"
