@@ -26,7 +26,6 @@ jobs:
     timeout-minutes: 240
     outputs:
       matrix: ${{ steps.prep.outputs.matrix }}
-      anzahl_teile: ${{ steps.prep.outputs.anzahl_teile }}
     steps:
       - name: Repository auschecken
         uses: actions/checkout@v4
@@ -40,28 +39,21 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install --no-cache-dir \
-            ebooklib \
-            beautifulsoup4 \
-            pymupdf \
-            pdfplumber \
-            lxml \
-            transformers \
-            sentencepiece \
-            sacremoses \
-            torch \
-            google-generativeai
+            ebooklib beautifulsoup4 pymupdf pdfplumber lxml \
+            transformers sentencepiece sacremoses torch google-generativeai
 
       - name: Text extrahieren und vorbereiten
         shell: bash
         run: |
+          mkdir -p output/meta
           cat > script_extract.py <<'PY'
-          import re
-          import glob
+          import re, glob
           from pathlib import Path
 
           QUELLSPRACHE = "${{ github.event.inputs.quellsprache }}".strip().lower()
           TEXT_DIR = Path("text")
           TEXT_DIR.mkdir(parents=True, exist_ok=True)
+          META = Path("output/meta")
 
           files = [Path(p) for p in glob.glob("text/buch.*") if not p.endswith(".gitkeep")]
           if not files:
@@ -73,8 +65,7 @@ jobs:
           endung = pfad.suffix.lower()
 
           def clean_text(t: str) -> str:
-              t = t.replace("\r\n", "\n").replace("\r", "\n")
-              t = t.replace("\u00ad", "")
+              t = t.replace("\r\n", "\n").replace("\r", "\n").replace("\u00ad", "")
               t = re.sub(r"[ \t]+", " ", t)
               t = re.sub(r"\n{3,}", "\n\n", t)
               t = re.sub(r"(?<![.!?:;,])\n(?!\n)", " ", t)
@@ -86,7 +77,7 @@ jobs:
               t = re.sub(r"\n{2,}", "\n\n", t)
               return t.strip()
 
-          def read_txt(path: Path) -> str:
+          def read_txt(path):
               for enc in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
                   try:
                       return path.read_text(encoding=enc)
@@ -94,7 +85,7 @@ jobs:
                       pass
               raise SystemExit("Fehler: TXT-Datei konnte nicht gelesen werden.")
 
-          def read_epub(path: Path) -> str:
+          def read_epub(path):
               from ebooklib import epub
               import ebooklib
               from bs4 import BeautifulSoup
@@ -103,12 +94,12 @@ jobs:
               for item in book.get_items():
                   if item.get_type() == ebooklib.ITEM_DOCUMENT:
                       soup = BeautifulSoup(item.get_content(), "html.parser")
-                      text = soup.get_text("\n")
-                      if text and text.strip():
-                          teile.append(text.strip())
+                      tx = soup.get_text("\n")
+                      if tx and tx.strip():
+                          teile.append(tx.strip())
               return "\n\n".join(teile)
 
-          def read_pdf(path: Path) -> str:
+          def read_pdf(path):
               import fitz
               teile = []
               with fitz.open(str(path)) as doc:
@@ -133,51 +124,32 @@ jobs:
 
           if QUELLSPRACHE == "en":
               from transformers import MarianMTModel, MarianTokenizer
-              modellname = "Helsinki-NLP/opus-mt-en-de"
-              tokenizer = MarianTokenizer.from_pretrained(modellname)
-              model = MarianMTModel.from_pretrained(modellname)
-              saetze = re.split(r'(?<=[.!?])\s+', text)
-              saetze = [s.strip() for s in saetze if s.strip()]
-              uebersetzt = []
-              batch = []
-              batch_chars = 0
-              max_batch_chars = 3500
-
-              def flush_batch(batch_list):
-                  if not batch_list:
-                      return []
-                  inputs = tokenizer(
-                      batch_list,
-                      return_tensors="pt",
-                      padding=True,
-                      truncation=True,
-                      max_length=512
-                  )
-                  outputs = model.generate(**inputs, max_length=512)
-                  return [tokenizer.decode(o, skip_special_tokens=True) for o in outputs]
-
+              tok = MarianTokenizer.from_pretrained("Helsinki-NLP/opus-mt-en-de")
+              model = MarianMTModel.from_pretrained("Helsinki-NLP/opus-mt-en-de")
+              saetze = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
+              uebersetzt, batch, batch_chars = [], [], 0
+              def flush(b):
+                  if not b: return []
+                  inp = tok(b, return_tensors="pt", padding=True, truncation=True, max_length=512)
+                  out = model.generate(**inp, max_length=512)
+                  return [tok.decode(o, skip_special_tokens=True) for o in out]
               for s in saetze:
-                  if len(s) > 1800:
-                      sub = re.split(r'(?<=[,;:])\s+', s)
-                  else:
-                      sub = [s]
-                  for piece in sub:
-                      piece = piece.strip()
-                      if not piece:
-                          continue
-                      if batch and batch_chars + len(piece) > max_batch_chars:
-                          uebersetzt.extend(flush_batch(batch))
-                          batch = []
-                          batch_chars = 0
-                      batch.append(piece)
-                      batch_chars += len(piece)
-
-              if batch:
-                  uebersetzt.extend(flush_batch(batch))
-
+                  pieces = re.split(r'(?<=[,;:])\s+', s) if len(s) > 1800 else [s]
+                  for p in pieces:
+                      p = p.strip()
+                      if not p: continue
+                      if batch and batch_chars + len(p) > 3500:
+                          uebersetzt.extend(flush(batch)); batch, batch_chars = [], 0
+                      batch.append(p); batch_chars += len(p)
+              if batch: uebersetzt.extend(flush(batch))
               text = clean_text(" ".join(uebersetzt))
 
-          (TEXT_DIR / "buch_glatt.txt").write_text(text, encoding="utf-8")
+          Path("text/buch_glatt.txt").write_text(text, encoding="utf-8")
+          META.mkdir(parents=True, exist_ok=True)
+          (META / "01_extraktion.txt").write_text(
+              f"Quelldatei: {pfad.name}\nQuellsprache: {QUELLSPRACHE}\n"
+              f"Zeichen extrahiert: {len(text)}\n", encoding="utf-8"
+          )
           PY
           python3 script_extract.py
 
@@ -188,124 +160,78 @@ jobs:
         shell: bash
         run: |
           cat > script_gemini_rewrite.py <<'PY'
-          import os
-          import re
-          import time
+          import os, re, time
           from pathlib import Path
           import google.generativeai as genai
 
           api_key = os.environ.get("GEMINI_API_KEY", "").strip()
           if not api_key:
-              raise SystemExit("Fehler: GitHub-Secret GEMINI_API_KEY fehlt oder ist leer.")
-
+              raise SystemExit("Fehler: GEMINI_API_KEY fehlt.")
           genai.configure(api_key=api_key)
           model = genai.GenerativeModel("gemini-2.5-flash")
 
           text_path = Path("text/buch_glatt.txt")
           text = text_path.read_text(encoding="utf-8")
-
           paragraphs = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
-          chunks = []
-          current = []
-          current_words = 0
-          target_words = 2200
 
-          def word_count(s: str) -> int:
-              return len(re.findall(r"\S+", s))
+          def wc(s): return len(re.findall(r"\S+", s))
 
+          chunks, current, cur_w = [], [], 0
           for p in paragraphs:
-              w = word_count(p)
-              if current and current_words + w > target_words:
-                  chunks.append("\n\n".join(current).strip())
-                  current = [p]
-                  current_words = w
+              w = wc(p)
+              if current and cur_w + w > 2200:
+                  chunks.append("\n\n".join(current)); current, cur_w = [p], w
               else:
-                  current.append(p)
-                  current_words += w
-          if current:
-              chunks.append("\n\n".join(current).strip())
+                  current.append(p); cur_w += w
+          if current: chunks.append("\n\n".join(current))
 
           prompt_prefix = (
               "Überarbeite den folgenden deutschen Buchtext ausschließlich für Text-to-Speech.\n"
               "Regeln:\n"
-              "1. Sehr lange Sätze mit mehreren Nebensätzen in kürzere, einfachere Hauptsätze aufteilen. "
-              "Kein Satz darf länger als 20 Wörter sein.\n"
-              "2. Sehr kurze Sätze (unter 5 Wörter) mit dem vorherigen oder nächsten Satz sinnvoll verbinden.\n"
-              "3. Doppelpunkte, die einen neuen Hauptsatz einleiten, wenn sinnvoll in Punkt plus neuen Satz umwandeln.\n"
-              "4. Eingeschobene Nebensätze zwischen Gedankenstrichen auflösen oder glätten.\n"
-              "5. Nur Standard-Satzzeichen verwenden: Punkt, Komma, Fragezeichen, Ausrufezeichen. "
-              "Keine Gedankenstriche, Semikolons, Klammern, Auslassungspunkte oder Sonderzeichen im Fließtext.\n"
-              "6. Zahlen als Ziffern beibehalten, aber niemals mehrere Satzzeichen direkt aneinanderreihen.\n"
-              "7. Abkürzungen wie z.B., u.a., etc. ausschreiben, damit keine Punkt-Kürzel entstehen.\n"
-              "8. Absatzstruktur beibehalten: Jeder inhaltliche Absatz aus dem Originaltext bleibt ein eigener Absatz, "
-              "getrennt durch eine komplett leere Zeile. Absätze niemals zusammenführen.\n"
-              "9. Keine inhaltlichen Kürzungen, keine Zusammenfassung, keine Auslassungen.\n"
-              "10. Bedeutung und Reihenfolge der Informationen beibehalten.\n"
-              "11. Nur den überarbeiteten Text ausgeben, keine Kommentare, keine Überschrift, keine Erklärung.\n\n"
+              "1. Lange Sätze in kürzere Hauptsätze aufteilen (max 20 Wörter).\n"
+              "2. Sehr kurze Sätze (unter 5 Wörter) mit Nachbarsatz verbinden.\n"
+              "3. Doppelpunkte, die Hauptsätze einleiten, in Punkt umwandeln.\n"
+              "4. Gedankenstrich-Einschübe auflösen.\n"
+              "5. Nur Punkt, Komma, Fragezeichen, Ausrufezeichen verwenden.\n"
+              "6. Abkürzungen wie z.B., u.a., etc. ausschreiben.\n"
+              "7. Absatzstruktur beibehalten, keine Kürzungen, keine Kommentare.\n\n"
               "TEXT:\n\n"
           )
 
-          out_chunks = []
-          report_lines = [f"Chunks gesamt: {len(chunks)}"]
-          failed = []
-
+          out_chunks, report, failed = [], [f"Chunks gesamt: {len(chunks)}"], []
           for idx, chunk in enumerate(chunks, start=1):
+              chunk_words = wc(chunk)
               success = False
-              chunk_words = word_count(chunk)
-
               for attempt in range(1, 5):
                   try:
-                      response = model.generate_content(
+                      resp = model.generate_content(
                           prompt_prefix + chunk,
-                          generation_config={
-                              "temperature": 0.2,
-                              "max_output_tokens": 8192
-                          }
+                          generation_config={"temperature": 0.2, "max_output_tokens": 8192}
                       )
-                      result = (response.text or "").strip()
-
+                      result = (resp.text or "").strip()
                       if not result:
                           raise ValueError("Leere Antwort")
-
-                      result_words = word_count(result)
-
-                      if result_words < int(chunk_words * 0.75):
-                          raise ValueError(
-                              f"Antwort zu kurz: Original {chunk_words} Wörter, Ergebnis {result_words} Wörter"
-                          )
-
+                      if wc(result) < int(chunk_words * 0.75):
+                          raise ValueError(f"zu kurz: {chunk_words} -> {wc(result)}")
                       out_chunks.append(result)
-                      report_lines.append(
-                          f"Chunk {idx:03d}: OK | Original {chunk_words} Wörter | Ergebnis {result_words} Wörter"
-                      )
+                      report.append(f"Chunk {idx:03d}: OK ({chunk_words} -> {wc(result)} Wörter)")
                       success = True
                       break
-
                   except Exception as e:
-                      if attempt < 4:
-                          time.sleep(8 * attempt)
-                      last_error = str(e)
-
+                      if attempt < 4: time.sleep(8 * attempt)
+                      last_err = str(e)
               if not success:
-                  out_chunks.append(chunk)
-                  failed.append(idx)
-                  report_lines.append(
-                      f"Chunk {idx:03d}: FEHLER -> Original übernommen | {last_error}"
-                  )
-
+                  out_chunks.append(chunk); failed.append(idx)
+                  report.append(f"Chunk {idx:03d}: FEHLER -> Original übernommen | {last_err}")
               time.sleep(2)
 
-          rewritten = "\n\n".join(out_chunks).strip() + "\n"
-          text_path.write_text(rewritten, encoding="utf-8")
-
-          meta_dir = Path("output/meta")
-          meta_dir.mkdir(parents=True, exist_ok=True)
-          report_lines.append(f"Fehlgeschlagene Chunks: {failed}")
-          (meta_dir / "glaettung_info.txt").write_text("\n".join(report_lines) + "\n", encoding="utf-8")
+          text_path.write_text("\n\n".join(out_chunks).strip() + "\n", encoding="utf-8")
+          report.append(f"Fehlgeschlagene Chunks: {failed}")
+          Path("output/meta/02_glaettung.txt").write_text("\n".join(report) + "\n", encoding="utf-8")
           PY
           python3 script_gemini_rewrite.py
 
-      - name: Text final für Piper härten und in Sätze aufteilen
+      - name: Text für Piper härten
         shell: bash
         run: |
           cat > script_harden.py <<'PY'
@@ -315,24 +241,17 @@ jobs:
           text_path = Path("text/buch_glatt.txt")
           text = text_path.read_text(encoding="utf-8")
 
-          def grundhaertung(t: str) -> str:
+          def grundhaertung(t):
               t = t.replace("–", ",").replace("—", ",")
               t = t.replace("„", '"').replace("“", '"').replace("‚", "'").replace("‘", "'")
               t = t.replace("…", ".")
-              abkuerzungen = {
-                  r"\bz\.B\.": "zum Beispiel",
-                  r"\bu\.a\.": "unter anderem",
-                  r"\betc\.": "und so weiter",
-                  r"\bd\.h\.": "das heißt",
-                  r"\bbzw\.": "beziehungsweise",
-                  r"\bggf\.": "gegebenenfalls",
-                  r"\busw\.": "und so weiter",
-                  r"\bca\.": "circa",
-                  r"\bNr\.": "Nummer",
-                  r"\bDr\.": "Doktor",
-                  r"\bProf\.": "Professor",
-              }
-              for muster, ersatz in abkuerzungen.items():
+              for muster, ersatz in {
+                  r"\bz\.B\.": "zum Beispiel", r"\bu\.a\.": "unter anderem",
+                  r"\betc\.": "und so weiter", r"\bd\.h\.": "das heißt",
+                  r"\bbzw\.": "beziehungsweise", r"\bggf\.": "gegebenenfalls",
+                  r"\busw\.": "und so weiter", r"\bca\.": "circa",
+                  r"\bNr\.": "Nummer", r"\bDr\.": "Doktor", r"\bProf\.": "Professor",
+              }.items():
                   t = re.sub(muster, ersatz, t)
               t = re.sub(r"[;:]", ".", t)
               t = re.sub(r"\(([^)]*)\)", r", \1,", t)
@@ -347,126 +266,95 @@ jobs:
               return t
 
           text = grundhaertung(text)
+          absaetze = [re.sub(r"\s+", " ", p).strip() for p in re.split(r"\n{2,}", text) if p.strip()]
 
-          absaetze = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
-          absaetze_flach = []
-          for absatz in absaetze:
-              absatz = re.sub(r"\n", " ", absatz)
-              absatz = re.sub(r" +", " ", absatz).strip()
-              absaetze_flach.append(absatz)
+          MIN_Z, MAX_Z = 40, 100
 
-          MIN_ZEICHEN = 40
-          MAX_ZEICHEN = 100
-
-          def stelle_satzzeichen_sicher(s: str) -> str:
+          def satzzeichen(s):
               s = s.strip()
-              if s and s[-1] not in ".!?":
-                  s += "."
+              if s and s[-1] not in ".!?": s += "."
               return s
 
-          def teile_zu_langen_satz(satz: str, max_z: int) -> list:
-              if len(satz) <= max_z:
-                  return [satz]
+          def teile_lang(satz, max_z):
+              if len(satz) <= max_z: return [satz]
               teile = re.split(r',\s+', satz)
-              ergebnis = []
-              aktuell = ""
+              erg, akt = [], ""
               for teil in teile:
-                  kandidat = aktuell + (", " if aktuell else "") + teil
-                  if len(kandidat) <= max_z:
-                      aktuell = kandidat
+                  kand = akt + (", " if akt else "") + teil
+                  if len(kand) <= max_z:
+                      akt = kand
                   else:
-                      if aktuell:
-                          ergebnis.append(stelle_satzzeichen_sicher(aktuell))
+                      if akt: erg.append(satzzeichen(akt))
                       if len(teil) > max_z:
-                          woerter = teil.split()
-                          zeile = ""
+                          woerter, zeile = teil.split(), ""
                           for w in woerter:
-                              kandidat2 = zeile + (" " if zeile else "") + w
-                              if len(kandidat2) <= max_z:
-                                  zeile = kandidat2
+                              k2 = zeile + (" " if zeile else "") + w
+                              if len(k2) <= max_z: zeile = k2
                               else:
-                                  if zeile:
-                                      ergebnis.append(stelle_satzzeichen_sicher(zeile))
+                                  if zeile: erg.append(satzzeichen(zeile))
                                   zeile = w
-                          aktuell = zeile
+                          akt = zeile
                       else:
-                          aktuell = teil
-              if aktuell:
-                  ergebnis.append(stelle_satzzeichen_sicher(aktuell))
-              return ergebnis if ergebnis else [stelle_satzzeichen_sicher(satz[:max_z])]
+                          akt = teil
+              if akt: erg.append(satzzeichen(akt))
+              return erg if erg else [satzzeichen(satz[:max_z])]
 
-          def fuehre_kurze_saetze_zusammen(saetze: list, min_z: int, max_z: int) -> list:
-              ergebnis = []
-              puffer = ""
+          def fuehre_zusammen(saetze, min_z, max_z):
+              erg, puf = [], ""
               for satz in saetze:
-                  if not puffer:
-                      puffer = satz
+                  if not puf:
+                      puf = satz
                   else:
-                      kandidat = puffer.rstrip()
-                      if kandidat and kandidat[-1] not in ".!?":
-                          kandidat += "."
-                      kandidat = kandidat + " " + satz
-                      if len(kandidat) <= max_z:
-                          puffer = kandidat
+                      k = puf.rstrip()
+                      if k and k[-1] not in ".!?": k += "."
+                      k = k + " " + satz
+                      if len(k) <= max_z:
+                          puf = k
                       else:
-                          ergebnis.append(stelle_satzzeichen_sicher(puffer))
-                          puffer = satz
-                  if len(puffer) >= min_z:
-                      ergebnis.append(stelle_satzzeichen_sicher(puffer))
-                      puffer = ""
-              if puffer:
-                  if ergebnis and len(puffer) < min_z:
-                      letzter = ergebnis.pop()
-                      letzter_ohne_punkt = letzter.rstrip()
-                      if letzter_ohne_punkt and letzter_ohne_punkt[-1] not in ".!?":
-                          letzter_ohne_punkt += "."
-                      zusammen = letzter_ohne_punkt + " " + puffer
-                      if len(zusammen) <= max_z * 1.5:
-                          ergebnis.append(stelle_satzzeichen_sicher(zusammen))
+                          erg.append(satzzeichen(puf)); puf = satz
+                  if len(puf) >= min_z:
+                      erg.append(satzzeichen(puf)); puf = ""
+              if puf:
+                  if erg and len(puf) < min_z:
+                      letzter = erg.pop()
+                      lo = letzter.rstrip()
+                      if lo and lo[-1] not in ".!?": lo += "."
+                      zus = lo + " " + puf
+                      if len(zus) <= max_z * 1.5:
+                          erg.append(satzzeichen(zus))
                       else:
-                          ergebnis.append(letzter)
-                          ergebnis.append(stelle_satzzeichen_sicher(puffer))
+                          erg.append(letzter); erg.append(satzzeichen(puf))
                   else:
-                      ergebnis.append(stelle_satzzeichen_sicher(puffer))
-              return ergebnis
+                      erg.append(satzzeichen(puf))
+              return erg
 
-          alle_zeilen = []
+          alle = []
+          for absatz in absaetze:
+              roh = [s.strip() for s in re.split(r'(?<=[.!?])\s+', absatz) if s.strip()]
+              zw = []
+              for s in roh:
+                  zw.extend(teile_lang(satzzeichen(s), MAX_Z))
+              alle.extend(fuehre_zusammen(zw, MIN_Z, MAX_Z))
+              alle.append("")
 
-          for absatz in absaetze_flach:
-              roh_saetze = re.split(r'(?<=[.!?])\s+', absatz)
-              roh_saetze = [s.strip() for s in roh_saetze if s.strip()]
-
-              zwischenschritt = []
-              for satz in roh_saetze:
-                  satz = stelle_satzzeichen_sicher(satz)
-                  zwischenschritt.extend(teile_zu_langen_satz(satz, MAX_ZEICHEN))
-
-              zusammengefuehrt = fuehre_kurze_saetze_zusammen(zwischenschritt, MIN_ZEICHEN, MAX_ZEICHEN)
-
-              alle_zeilen.extend(zusammengefuehrt)
-              alle_zeilen.append("")
-
-          bereinigt = []
-          letzte_war_leer = False
-          for z in alle_zeilen:
+          bereinigt, leer = [], False
+          for z in alle:
               if z == "":
-                  if not letzte_war_leer:
-                      bereinigt.append("")
-                  letzte_war_leer = True
+                  if not leer: bereinigt.append("")
+                  leer = True
               else:
-                  bereinigt.append(z)
-                  letzte_war_leer = False
+                  bereinigt.append(z); leer = False
+          while bereinigt and bereinigt[0] == "": bereinigt.pop(0)
+          while bereinigt and bereinigt[-1] == "": bereinigt.pop()
 
-          while bereinigt and bereinigt[0] == "":
-              bereinigt.pop(0)
-          while bereinigt and bereinigt[-1] == "":
-              bereinigt.pop()
-
-          ausgabe = "\n".join(bereinigt) + "\n"
-          text_path.write_text(ausgabe, encoding="utf-8")
-
+          text_path.write_text("\n".join(bereinigt) + "\n", encoding="utf-8")
           nicht_leer = [z for z in bereinigt if z]
-          print(f"Zeilen gesamt: {len(nicht_leer)}")
+          Path("output/meta/03_haertung.txt").write_text(
+              f"Zeilen nach Haertung: {len(nicht_leer)}\n"
+              f"Zeilen unter {MIN_Z} Zeichen: {sum(1 for z in nicht_leer if len(z) < MIN_Z)}\n"
+              f"Zeilen ueber {MAX_Z} Zeichen: {sum(1 for z in nicht_leer if len(z) > MAX_Z)}\n",
+              encoding="utf-8"
+          )
           PY
           python3 script_harden.py
 
@@ -475,101 +363,59 @@ jobs:
         shell: bash
         run: |
           cat > script_prepare.py <<'PY'
-          import re
-          import math
-          import json
+          import re, math, json
           from pathlib import Path
 
-          OUT_DIR = Path("output")
-          PARTS_DIR = OUT_DIR / "parts"
-          META_DIR = OUT_DIR / "meta"
-          OUT_DIR.mkdir(parents=True, exist_ok=True)
-          PARTS_DIR.mkdir(parents=True, exist_ok=True)
-          META_DIR.mkdir(parents=True, exist_ok=True)
+          PARTS_DIR = Path("output/parts"); PARTS_DIR.mkdir(parents=True, exist_ok=True)
+          META = Path("output/meta")
 
           text = Path("text/buch_glatt.txt").read_text(encoding="utf-8")
-
           total_chars = len(text)
-          words = len(re.findall(r"\S+", text))
 
-          target_chars_per_part = 90000
-          min_chars_per_part = 40000
-          max_chars_per_part = 120000
-
-          estimated_parts = max(1, math.ceil(total_chars / target_chars_per_part))
-          estimated_parts = min(estimated_parts, 12)
-          target_chars = max(min_chars_per_part, min(max_chars_per_part, math.ceil(total_chars / estimated_parts)))
+          target, min_c, max_c = 90000, 40000, 120000
+          est_parts = min(max(1, math.ceil(total_chars / target)), 12)
+          target_chars = max(min_c, min(max_c, math.ceil(total_chars / est_parts)))
 
           lines = text.split("\n")
-
-          parts = []
-          current_lines = []
-          cur_len = 0
-
+          parts, current, cur_len = [], [], 0
           for line in lines:
-              current_lines.append(line)
-              cur_len += len(line) + 1
+              current.append(line); cur_len += len(line) + 1
               is_blank = (line.strip() == "")
-              erreicht_ziel = cur_len >= target_chars
-              erreicht_max = cur_len >= max_chars_per_part
-              if (erreicht_ziel and is_blank) or erreicht_max:
-                  parts.append(current_lines)
-                  current_lines = []
-                  cur_len = 0
-
-          if current_lines:
-              rest_len = sum(len(x) + 1 for x in current_lines)
-              if parts and rest_len < min_chars_per_part:
-                  parts[-1].extend(current_lines)
+              if (cur_len >= target_chars and is_blank) or cur_len >= max_c:
+                  parts.append(current); current, cur_len = [], 0
+          if current:
+              if parts and sum(len(x)+1 for x in current) < min_c:
+                  parts[-1].extend(current)
               else:
-                  parts.append(current_lines)
+                  parts.append(current)
+          if not parts: parts = [lines]
 
-          if not parts:
-              parts = [lines]
+          # Sicherheitsprüfung: verhindert den "1-Teil-Bug" aus früheren Läufen
+          groesster_teil = max(sum(len(x)+1 for x in p) for p in parts)
+          if len(parts) < 2 and total_chars > max_c:
+              raise SystemExit(
+                  f"Fehler: Aufteilung fehlgeschlagen. Nur {len(parts)} Teil(e) bei "
+                  f"{total_chars} Zeichen gesamt. Abbruch statt fehlerhaften Lauf."
+              )
+          if groesster_teil > max_c * 1.5:
+              raise SystemExit(
+                  f"Fehler: Ein Teil ist mit {groesster_teil} Zeichen deutlich zu groß. Abbruch."
+              )
 
-          if len(parts) > 12:
-              zusammengefasst = parts[:11]
-              rest = parts[11:]
-              rest_lines = []
-              for p in rest:
-                  rest_lines.extend(p)
-              zusammengefasst.append(rest_lines)
-              parts = zusammengefasst
+          for idx, block in enumerate(parts, start=1):
+              (PARTS_DIR / f"teil_{idx:03d}.txt").write_text(
+                  "\n".join(block).strip() + "\n", encoding="utf-8"
+              )
 
-          def block_len(block_lines):
-              return sum(len(x) + 1 for x in block_lines)
+          info = [f"Zeichen gesamt: {total_chars}", f"Anzahl Teile: {len(parts)}"]
+          for idx, block in enumerate(parts, start=1):
+              info.append(f"Teil {idx:03d}: {sum(len(x)+1 for x in block)} Zeichen")
+          (META / "04_aufteilung.txt").write_text("\n".join(info) + "\n", encoding="utf-8")
 
-          for idx, block_lines in enumerate(parts, start=1):
-              inhalt = "\n".join(block_lines).strip() + "\n"
-              (PARTS_DIR / f"teil_{idx:03d}.txt").write_text(inhalt, encoding="utf-8")
-
-          info = []
-          info.append(f"Zeichen gesamt: {total_chars}")
-          info.append(f"Wörter gesamt: {words}")
-          info.append(f"Anzahl Teile: {len(parts)}")
-          info.append(f"Ziel-Zeichen pro Teil: {target_chars}")
-          for idx, block_lines in enumerate(parts, start=1):
-              info.append(f"Teil {idx:03d}: {block_len(block_lines)} Zeichen")
-
-          (META_DIR / "aufteilung.txt").write_text("\n".join(info) + "\n", encoding="utf-8")
-
-          vorschau = []
-          for idx, block_lines in enumerate(parts, start=1):
-              teil_text = " ".join(block_lines)
-              woerter = re.findall(r"\S+", teil_text)
-              erste5 = " ".join(woerter[:5])
-              letzte5 = " ".join(woerter[-5:]) if len(woerter) >= 5 else " ".join(woerter)
-              vorschau.append(f"Teil {idx:03d}: [{erste5}] ... [{letzte5}]")
-
-          (META_DIR / "textvorschau.txt").write_text("\n".join(vorschau) + "\n", encoding="utf-8")
-
-          matrix_liste = [f"{i:03d}" for i in range(1, len(parts) + 1)]
-          (META_DIR / "matrix.json").write_text(json.dumps(matrix_liste), encoding="utf-8")
-          (META_DIR / "anzahl.txt").write_text(str(len(parts)), encoding="utf-8")
+          (META / "matrix.json").write_text(json.dumps([f"{i:03d}" for i in range(1, len(parts)+1)]), encoding="utf-8")
           PY
           python3 script_prepare.py
           echo "matrix=$(cat output/meta/matrix.json)" >> "$GITHUB_OUTPUT"
-          echo "anzahl_teile=$(cat output/meta/anzahl.txt)" >> "$GITHUB_OUTPUT"
 
       - name: Textteile als Artefakt hochladen
         uses: actions/upload-artifact@v4
@@ -577,9 +423,7 @@ jobs:
           name: text-teile
           path: |
             output/parts/
-            output/meta/aufteilung.txt
-            output/meta/textvorschau.txt
-            output/meta/glaettung_info.txt
+            output/meta/
           retention-days: 1
 
   sprachsynthese:
@@ -616,30 +460,29 @@ jobs:
           wget -q -O voices/de_DE-thorsten-high.onnx.json \
             https://huggingface.co/rhasspy/piper-voices/resolve/main/de/de_DE/thorsten/high/de_DE-thorsten-high.onnx.json
 
-      - name: Audio-Teil erzeugen mit automatischer Qualitätsprüfung
+      - name: Audio-Teil erzeugen mit exakter Zeilenmessung
         shell: bash
         run: |
           mkdir -p output/audio output/meta
           cat > script_synthese.py <<'PY'
-          import subprocess
-          import sys
-          import wave
-          import array
-          import math
+          import subprocess, sys, wave, array
           from pathlib import Path
 
           TEIL = sys.argv[1]
-          TXT_PATH = Path(f"output/parts/teil_{TEIL}.txt")
+          TXT = Path(f"output/parts/teil_{TEIL}.txt")
           VOICE = "voices/de_DE-thorsten-high.onnx"
-          RAW_WAV = Path(f"output/audio/teil_{TEIL}_raw.wav")
           FINAL_WAV = Path(f"output/audio/teil_{TEIL}.wav")
           FINAL_MP3 = Path(f"output/audio/teil_{TEIL}.mp3")
           REPORT = Path(f"output/meta/qualitaet_teil_{TEIL}.txt")
 
-          BASE_PARAMS = ["--length_scale", "1.20", "--noise_scale", "0.667",
-                         "--noise_w", "0.8", "--sentence_silence", "0.35"]
+          VERSUCHE = [
+              ["--length_scale", "1.20", "--noise_scale", "0.667", "--noise_w", "0.8", "--sentence_silence", "0.35"],
+              ["--length_scale", "1.35", "--noise_scale", "0.667", "--noise_w", "0.8", "--sentence_silence", "0.35"],
+              ["--length_scale", "1.50", "--noise_scale", "0.667", "--noise_w", "0.9", "--sentence_silence", "0.35"],
+          ]
+          MAX_CHARS_PRO_SEK = 22.0
 
-          lines = [l.strip() for l in TXT_PATH.read_text(encoding="utf-8").split("\n") if l.strip()]
+          lines = [l.strip() for l in TXT.read_text(encoding="utf-8").split("\n") if l.strip()]
 
           def run_piper(text, out_wav, params):
               proc = subprocess.run(
@@ -648,171 +491,59 @@ jobs:
               )
               return proc.returncode == 0 and out_wav.exists() and out_wav.stat().st_size > 0
 
-          def read_wav_samples(path):
+          def wav_info(path):
               with wave.open(str(path), "rb") as w:
-                  n = w.getnframes()
-                  sr = w.getframerate()
-                  sw = w.getsampwidth()
-                  ch = w.getnchannels()
+                  n, sr, sw, ch = w.getnframes(), w.getframerate(), w.getsampwidth(), w.getnchannels()
                   raw = w.readframes(n)
-              if sw == 2:
-                  samples = array.array("h", raw)
-              else:
-                  samples = array.array("b", raw)
-              if ch > 1:
-                  samples = samples[::ch]
+              samples = array.array("h", raw) if sw == 2 else array.array("b", raw)
+              if ch > 1: samples = samples[::ch]
               return samples, sr
 
-          def write_wav_samples(path, samples, sr):
-              with wave.open(str(path), "wb") as w:
-                  w.setnchannels(1)
-                  w.setsampwidth(2)
-                  w.setframerate(sr)
-                  w.writeframes(array.array("h", samples).tobytes())
+          report = [f"Teil {TEIL}: {len(lines)} Zeilen"]
+          fixes = 0
+          all_samples, sr_final = array.array("h"), 22050
 
-          def rms_windows(samples, sr, window_ms=20):
-              win = max(1, int(sr * window_ms / 1000))
-              energies = []
-              for i in range(0, max(0, len(samples) - win), win):
-                  chunk = samples[i:i + win]
-                  s = sum(x * x for x in chunk) / len(chunk)
-                  energies.append(math.sqrt(s))
-              return energies, win
+          for idx, line in enumerate(lines, start=1):
+              tmp = Path(f"output/audio/tmp_{TEIL}_{idx:05d}.wav")
+              beste_samples, beste_sr, beste_rate = None, None, 999.0
 
-          def find_boundaries(samples, sr, n_segments):
-              energies, win = rms_windows(samples, sr)
-              if not energies:
-                  return []
-              max_e = max(energies) or 1
-              threshold = max_e * 0.02
-              silence_runs = []
-              run_start = None
-              for idx, e in enumerate(energies):
-                  if e < threshold:
-                      if run_start is None:
-                          run_start = idx
-                  else:
-                      if run_start is not None:
-                          silence_runs.append((run_start, idx))
-                          run_start = None
-              if run_start is not None:
-                  silence_runs.append((run_start, len(energies)))
-              silence_runs.sort(key=lambda r: r[1] - r[0], reverse=True)
-              needed = max(0, n_segments - 1)
-              chosen = sorted(silence_runs[:needed], key=lambda r: r[0])
-              return [int(((a + b) / 2) * win) for a, b in chosen]
-
-          def segment_audio(samples, boundaries):
-              segs = []
-              prev = 0
-              for b in boundaries:
-                  segs.append(samples[prev:b])
-                  prev = b
-              segs.append(samples[prev:])
-              return segs
-
-          MAX_CHARS_PRO_SEK = 17.0
-          MIN_CHARS_PRO_SEK_CHECK = 4.0
-
-          report_lines = [f"Teil {TEIL}: {len(lines)} Zeilen"]
-
-          if not run_piper("\n".join(lines), RAW_WAV, BASE_PARAMS):
-              print(f"FEHLER: Grundsynthese fehlgeschlagen fuer Teil {TEIL}", file=sys.stderr)
-              sys.exit(1)
-
-          samples, sr = read_wav_samples(RAW_WAV)
-          boundaries = find_boundaries(samples, sr, len(lines))
-          segments = segment_audio(samples, boundaries)
-
-          if len(segments) != len(lines):
-              report_lines.append(
-                  f"WARNUNG: Segmentanzahl ({len(segments)}) != Zeilenanzahl ({len(lines)}). "
-                  f"Automatische Einzelpruefung fuer diesen Teil uebersprungen, Originalaudio wird verwendet."
-              )
-              write_wav_samples(FINAL_WAV, samples, sr)
-          else:
-              fixed_segments = []
-              anzahl_fixes = 0
-              for idx, (line, seg) in enumerate(zip(lines, segments), start=1):
-                  dauer = len(seg) / sr if sr else 0
-                  chars = len(line)
-                  rate = chars / dauer if dauer > 0 else 999
-                  ok = (dauer > 0) and (rate <= MAX_CHARS_PRO_SEK) and (rate >= MIN_CHARS_PRO_SEK_CHECK or chars < 20)
-
-                  if ok:
-                      fixed_segments.append(seg)
+              for v_idx, params in enumerate(VERSUCHE, start=1):
+                  if not run_piper(line, tmp, params):
                       continue
+                  samples, sr = wav_info(tmp)
+                  dauer = len(samples) / sr if sr else 0
+                  rate = len(line) / dauer if dauer > 0 else 999
+                  if beste_samples is None or rate < beste_rate:
+                      beste_samples, beste_sr, beste_rate = samples, sr, rate
+                  if dauer > 0 and rate <= MAX_CHARS_PRO_SEK:
+                      if v_idx > 1:
+                          fixes += 1
+                          report.append(f"Zeile {idx:05d}: behoben in Versuch {v_idx} ({rate:.1f} Zeichen/Sek) -> {line[:60]}")
+                      break
+              tmp.unlink(missing_ok=True)
 
-                  anzahl_fixes += 1
-                  report_lines.append(
-                      f"Zeile {idx:04d} auffaellig: {chars} Zeichen, {dauer:.2f}s, "
-                      f"{rate:.1f} Zeichen/Sek -> {line[:70]}"
-                  )
+              if beste_samples is None:
+                  report.append(f"Zeile {idx:05d}: FEHLER, keine Synthese moeglich -> {line[:60]}")
+                  continue
 
-                  geloest = False
-                  versuche = [
-                      ["--length_scale", "1.20", "--noise_scale", "0.667", "--noise_w", "0.8", "--sentence_silence", "0.35"],
-                      ["--length_scale", "1.35", "--noise_scale", "0.667", "--noise_w", "0.8", "--sentence_silence", "0.35"],
-                      ["--length_scale", "1.50", "--noise_scale", "0.667", "--noise_w", "0.9", "--sentence_silence", "0.35"],
-                  ]
-                  tmp_wav = Path(f"output/audio/fix_{TEIL}_{idx:04d}.wav")
+              sr_final = beste_sr
+              all_samples.extend(beste_samples)
+              all_samples.extend(array.array("h", [0]) * int(sr_final * 0.35))
 
-                  for v_idx, params in enumerate(versuche, start=1):
-                      if run_piper(line, tmp_wav, params):
-                          fix_samples, fix_sr = read_wav_samples(tmp_wav)
-                          fix_dauer = len(fix_samples) / fix_sr if fix_sr else 0
-                          fix_rate = chars / fix_dauer if fix_dauer > 0 else 999
-                          if fix_dauer > 0 and fix_rate <= MAX_CHARS_PRO_SEK:
-                              fixed_segments.append(fix_samples)
-                              report_lines.append(
-                                  f"  -> behoben in Versuch {v_idx} ({fix_dauer:.2f}s, {fix_rate:.1f} Zeichen/Sek)"
-                              )
-                              geloest = True
-                              tmp_wav.unlink(missing_ok=True)
-                              break
-                      tmp_wav.unlink(missing_ok=True)
+              if beste_rate > MAX_CHARS_PRO_SEK:
+                  report.append(f"Zeile {idx:05d}: weiterhin auffaellig ({beste_rate:.1f} Zeichen/Sek) -> {line[:60]}")
 
-                  if not geloest:
-                      woerter = line.split()
-                      if len(woerter) >= 4:
-                          mitte = len(woerter) // 2
-                          teil_a = " ".join(woerter[:mitte])
-                          teil_b = " ".join(woerter[mitte:])
-                          erfolge = []
-                          for t in (teil_a, teil_b):
-                              tmp2 = Path(f"output/audio/fixsplit_{TEIL}_{idx:04d}_{len(erfolge)}.wav")
-                              if run_piper(t, tmp2, versuche[1]):
-                                  s2, sr2 = read_wav_samples(tmp2)
-                                  erfolge.append(s2)
-                              tmp2.unlink(missing_ok=True)
-                          if len(erfolge) == 2:
-                              fixed_segments.append(erfolge[0])
-                              fixed_segments.append(erfolge[1])
-                              report_lines.append("  -> in zwei Haelften aufgeteilt und einzeln synthetisiert")
-                              geloest = True
+          with wave.open(str(FINAL_WAV), "wb") as w:
+              w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr_final)
+              w.writeframes(all_samples.tobytes())
 
-                  if not geloest:
-                      fixed_segments.append(seg)
-                      report_lines.append("  -> keine Verbesserung erreicht, Original-Segment beibehalten")
-
-              zusammengefuegt = array.array("h")
-              pause_samples = array.array("h", [0]) * int(sr * 0.35)
-              for i, seg in enumerate(fixed_segments):
-                  zusammengefuegt.extend(seg)
-                  if i < len(fixed_segments) - 1:
-                      zusammengefuegt.extend(pause_samples)
-
-              write_wav_samples(FINAL_WAV, zusammengefuegt, sr)
-              report_lines.append(f"Anzahl automatisch korrigierter Zeilen: {anzahl_fixes}")
-
-          Path("output/meta").mkdir(parents=True, exist_ok=True)
-          REPORT.write_text("\n".join(report_lines) + "\n", encoding="utf-8")
+          report.append(f"Anzahl automatisch korrigierter Zeilen: {fixes}")
+          REPORT.write_text("\n".join(report) + "\n", encoding="utf-8")
 
           subprocess.run(
               ["ffmpeg", "-y", "-i", str(FINAL_WAV), "-codec:a", "libmp3lame", "-qscale:a", "2", str(FINAL_MP3)],
               capture_output=True
           )
-          RAW_WAV.unlink(missing_ok=True)
           FINAL_WAV.unlink(missing_ok=True)
           PY
           python3 script_synthese.py "${{ matrix.teil }}"
@@ -860,21 +591,42 @@ jobs:
           path: output/meta
           merge-multiple: true
 
-      - name: Aufteilungsinfo herunterladen
+      - name: Textmeta herunterladen
         uses: actions/download-artifact@v4
         with:
           name: text-teile
           path: output
 
-      - name: Gesamt-Qualitätsbericht zusammenfassen
+      - name: Gesamtbericht in einer Datei zusammenfassen
         shell: bash
         run: |
-          cat output/meta/qualitaet_teil_*.txt > output/meta/qualitaet_gesamt.txt 2>/dev/null || true
+          mkdir -p release
+          {
+            echo "===== HOERBUCH BERICHT - Lauf ${{ github.run_id }} ====="
+            echo
+            echo "--- 1. Textextraktion ---"
+            cat output/meta/01_extraktion.txt 2>/dev/null || echo "(kein Bericht vorhanden)"
+            echo
+            echo "--- 2. Sprachliche Glaettung (Gemini) ---"
+            cat output/meta/02_glaettung.txt 2>/dev/null || echo "(nicht aktiviert oder kein Bericht)"
+            echo
+            echo "--- 3. Haertung fuer Piper ---"
+            cat output/meta/03_haertung.txt 2>/dev/null || echo "(kein Bericht vorhanden)"
+            echo
+            echo "--- 4. Aufteilung in Teile ---"
+            cat output/meta/04_aufteilung.txt 2>/dev/null || echo "(kein Bericht vorhanden)"
+            echo
+            echo "--- 5. Sprachsynthese: Qualitaet je Teil ---"
+            for f in $(ls output/meta/qualitaet_teil_*.txt 2>/dev/null | sort); do
+              echo ">>> $(basename "$f")"
+              cat "$f"
+              echo
+            done
+          } > release/bericht_gesamt.txt
 
       - name: Gesamt-MP3 erzeugen
         shell: bash
         run: |
-          mkdir -p output/meta
           ls output/audio/teil_*.mp3 | sort > output/meta/mp3_list_raw.txt
           BASE="$(pwd)"
           awk -v base="$BASE" '{print "file '\''" base "/" $0 "'\''"}' output/meta/mp3_list_raw.txt > output/meta/concat.txt
@@ -883,10 +635,9 @@ jobs:
             -metadata artist="Melvin-Udall" \
             -c copy output/hoerbuch_gesamt.mp3
 
-      - name: Dateinamen normalisieren
+      - name: Dateien für Release vorbereiten
         shell: bash
         run: |
-          mkdir -p release
           cp output/hoerbuch_gesamt.mp3 "release/00_hoerbuch_gesamt.mp3"
           i=1
           for f in $(ls output/audio/teil_*.mp3 | sort); do
@@ -894,14 +645,6 @@ jobs:
             cp "$f" "release/${nr}_$(basename "$f")"
             i=$((i+1))
           done
-          cp output/meta/aufteilung.txt release/aufteilung.txt
-          cp output/meta/textvorschau.txt release/textvorschau.txt
-          if [ -f output/meta/glaettung_info.txt ]; then
-            cp output/meta/glaettung_info.txt release/glaettung_info.txt
-          fi
-          if [ -f output/meta/qualitaet_gesamt.txt ]; then
-            cp output/meta/qualitaet_gesamt.txt release/qualitaet_gesamt.txt
-          fi
 
       - name: Release veröffentlichen
         uses: softprops/action-gh-release@v2
@@ -911,14 +654,10 @@ jobs:
           files: |
             release/*
           body: |
-            Automatisch erstelltes Hörbuch
-            Enthalten:
-            - Gesamtdatei als MP3
-            - Einzelteile als MP3
-            - Textdatei mit Aufteilungsinfo
-            - Textvorschau
-            - Glättungsinfo (falls Gemini aktiviert war)
-            - Qualitätsbericht (automatisch erkannte und korrigierte Stellen)
+            Automatisch erstelltes Hörbuch.
+            Enthalten: Gesamt-MP3, Einzelteile als MP3, und EINE zusammengefasste
+            Berichtsdatei (bericht_gesamt.txt) mit allen Verarbeitungsschritten
+            und der Qualitätsprüfung jeder Zeile.
 
       - name: E-Mail mit Download-Link senden
         uses: dawidd6/action-send-mail@v3
@@ -935,10 +674,6 @@ jobs:
             Dein Hörbuch ist fertig.
             Download:
             https://github.com/Melvin-Udall/H-rb-cher/releases/tag/hoerbuch-${{ github.run_id }}
-            Enthalten sind:
-            - eine Gesamt-MP3
-            - mehrere Teil-MP3s
-            - eine Datei mit Aufteilungsinformationen
-            - eine Textvorschau
-            - optional eine Glättungsinfo
-            - ein Qualitätsbericht mit automatisch erkannten und korrigierten Stellen
+            Enthalten: eine Gesamt-MP3, mehrere Teil-MP3s und EINE Berichtsdatei
+            (bericht_gesamt.txt) mit allen Informationen zu Extraktion, Glättung,
+            Härtung, Aufteilung und Qualitätsprüfung.
