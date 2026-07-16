@@ -12,7 +12,7 @@ on:
           - de
           - en
       text_ueberarbeiten:
-        description: "Text vor Vertonung mit Grok sprachlich glätten"
+        description: "Text vor Vertonung mit Perplexity sprachlich glätten"
         required: true
         default: "ja"
         type: choice
@@ -153,26 +153,26 @@ jobs:
           PY
           python3 script_extract.py
 
-      - name: Text mit Grok sprachlich glätten
+      - name: Text mit Perplexity sprachlich glätten
         if: ${{ github.event.inputs.text_ueberarbeiten == 'ja' }}
         env:
-          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          PPLX_API_KEY: ${{ secrets.PPLX_API_KEY }}
         shell: bash
         run: |
-          cat > script_grok_rewrite.py <<'PY'
+          cat > script_perplexity_rewrite.py <<'PY'
           import os, re, time
           from pathlib import Path
           from openai import OpenAI
 
-          MODELL = "grok-4-fast"
+          MODELL = "sonar"
           CHUNK_MAX_WOERTER = 1500
           PAUSE_ZWISCHEN_CHUNKS = 2
           RETRY_PAUSEN = [15, 30, 60]
 
-          api_key = os.environ.get("XAI_API_KEY", "").strip()
+          api_key = os.environ.get("PPLX_API_KEY", "").strip()
           if not api_key:
-              raise SystemExit("Fehler: XAI_API_KEY fehlt.")
-          client = OpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
+              raise SystemExit("Fehler: PPLX_API_KEY fehlt.")
+          client = OpenAI(api_key=api_key, base_url="https://api.perplexity.ai")
 
           text_path = Path("text/buch_glatt.txt")
           text = text_path.read_text(encoding="utf-8")
@@ -195,11 +195,19 @@ jobs:
               "1. Lange Sätze in kürzere Hauptsätze aufteilen (max 20 Wörter).\n"
               "2. Sehr kurze Sätze (unter 5 Wörter) mit Nachbarsatz verbinden.\n"
               "3. Doppelpunkte, die Hauptsätze einleiten, in Punkt umwandeln.\n"
-              "4. Gedankenstrich-Einschübe auflösen.\n"
+              "4. Gedankenstrich-Einschübe auflösen, normale Sätze daraus machen.\n"
               "5. Nur Punkt, Komma, Fragezeichen, Ausrufezeichen verwenden.\n"
-              "6. Abkürzungen wie z.B., u.a., etc. ausschreiben.\n"
-              "7. Absatzstruktur beibehalten, keine Kürzungen, keine Kommentare.\n"
-              "8. Gib ausschließlich den überarbeiteten Text zurück, keine Einleitung."
+              "6. Abkürzungen ausschreiben (z.B. -> zum Beispiel, u.a. -> unter anderem, "
+              "d.h. -> das heißt, bzw. -> beziehungsweise, usw. -> und so weiter, "
+              "etc. -> und so weiter, ggf. -> gegebenenfalls, ca. -> circa).\n"
+              "7. Ordinalzahlen vor Substantiven ausschreiben (19. Jahrhundert -> neunzehnten Jahrhundert).\n"
+              "8. Absatzstruktur beibehalten, keine Kürzungen, keine Kommentare.\n"
+              "9. TTS-störende Elemente entfernen oder integrieren: Fußnotennummern, "
+              "Klammerverweise, Sonderzeichen, Semikolons als Aufzählungszeichen. "
+              "Nur weglassen wenn dabei inhaltlich nichts verloren geht, im Zweifel "
+              "behutsam umformulieren statt ersatzlos streichen.\n"
+              "10. Gib ausschließlich den überarbeiteten Text zurück, keine Einleitung, "
+              "keine Erklärungen, keine Kommentare."
           )
 
           out_chunks, report, failed = [], [f"Modell: {MODELL}", f"Chunks gesamt: {len(chunks)}",
@@ -251,7 +259,7 @@ jobs:
           report.append(f"Erfolgreich: {len(chunks) - len(failed)} / {len(chunks)}")
           Path("output/meta/02_glaettung.txt").write_text("\n".join(report) + "\n", encoding="utf-8")
           PY
-          python3 script_grok_rewrite.py
+          python3 script_perplexity_rewrite.py
 
       - name: Text für Piper härten
         shell: bash
@@ -660,7 +668,7 @@ jobs:
             echo "--- 1. Textextraktion ---"
             cat output/meta/01_extraktion.txt 2>/dev/null || echo "(kein Bericht vorhanden)"
             echo
-            echo "--- 2. Sprachliche Glaettung (Grok) ---"
+            echo "--- 2. Sprachliche Glaettung (Perplexity sonar) ---"
             cat output/meta/02_glaettung.txt 2>/dev/null || echo "(nicht aktiviert oder kein Bericht)"
             echo
             echo "--- 3. Haertung fuer Piper ---"
