@@ -169,6 +169,7 @@ jobs:
           PAUSE_ZWISCHEN_CHUNKS = 2
           RETRY_PAUSEN = [15, 30, 60]
           ANFRAGE_TIMEOUT_SEK = 60.0
+          MAX_FOLGEFEHLER = 5
 
           api_key = os.environ.get("PPLX_API_KEY", "").strip()
           if not api_key:
@@ -230,6 +231,7 @@ jobs:
                                              f"Pause zwischen Chunks: {PAUSE_ZWISCHEN_CHUNKS}s"], []
 
           start_gesamt = time.time()
+          folgefehler = 0
           print(f"[START] {len(chunks)} Chunks insgesamt zu verarbeiten.", flush=True)
 
           for idx, chunk in enumerate(chunks, start=1):
@@ -241,9 +243,7 @@ jobs:
 
               for attempt, wartezeit in enumerate([0] + RETRY_PAUSEN, start=1):
                   if wartezeit > 0:
-                      msg = f"Chunk {idx:04d}/{len(chunks)}: Wartezeit {wartezeit}s vor Versuch {attempt}..."
-                      report.append(msg)
-                      print(f"[LAUFEND] {msg}", flush=True)
+                      report.append(f"Chunk {idx:04d}: Wartezeit {wartezeit}s vor Versuch {attempt}...")
                       time.sleep(wartezeit)
                   try:
                       resp = client.chat.completions.create(
@@ -267,8 +267,9 @@ jobs:
                       success = True
                       break
                   except Exception as e:
-                      last_err = str(e)
-                      report.append(f"Chunk {idx:04d}: Versuch {attempt} fehlgeschlagen: {last_err[:150]}")
+                      last_err = f"{type(e).__name__}: {e}"
+                      report.append(f"Chunk {idx:04d}: Versuch {attempt} fehlgeschlagen: {last_err[:300]}")
+                      print(f"[VERSUCH-FEHLER] Chunk {idx:04d}/{len(chunks)} Versuch {attempt}: {last_err[:300]}", flush=True)
 
               dauer_chunk = time.time() - start_chunk
               dauer_gesamt = time.time() - start_gesamt
@@ -276,10 +277,24 @@ jobs:
               if not success:
                   out_chunks.append(chunk)
                   failed.append(idx)
-                  report.append(f"Chunk {idx:04d}: ALLE VERSUCHE FEHLGESCHLAGEN -> Original übernommen")
+                  folgefehler += 1
+                  report.append(f"Chunk {idx:04d}: ALLE VERSUCHE FEHLGESCHLAGEN -> Original übernommen. Letzter Fehler: {last_err[:300]}")
                   print(f"[FEHLER] Chunk {idx:04d}/{len(chunks)} fehlgeschlagen "
-                        f"(Dauer: {dauer_chunk:.1f}s, Gesamt: {dauer_gesamt/60:.1f}min)", flush=True)
+                        f"(Dauer: {dauer_chunk:.1f}s, Gesamt: {dauer_gesamt/60:.1f}min, "
+                        f"Folgefehler in Reihe: {folgefehler}) -> {last_err[:200]}", flush=True)
+
+                  if folgefehler >= MAX_FOLGEFEHLER:
+                      report.append(
+                          f"\nABBRUCH: {folgefehler} Chunks in Folge komplett fehlgeschlagen. "
+                          f"Letzter Fehler: {last_err[:300]}. Vermutlich Auth- oder Guthaben-Problem "
+                          f"bei PPLX_API_KEY, keine reinen Netzwerkaussetzer."
+                      )
+                      Path("output/meta/02_glaettung.txt").write_text("\n".join(report) + "\n", encoding="utf-8")
+                      print(f"[ABBRUCH] {folgefehler} Chunks in Folge fehlgeschlagen. "
+                            f"Letzter Fehler: {last_err[:300]}. Breche ab statt sinnlos weiterzulaufen.", flush=True)
+                      sys.exit(1)
               else:
+                  folgefehler = 0
                   print(f"[OK] Chunk {idx:04d}/{len(chunks)} fertig "
                         f"(Dauer: {dauer_chunk:.1f}s, Gesamt: {dauer_gesamt/60:.1f}min)", flush=True)
 
