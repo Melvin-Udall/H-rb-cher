@@ -165,7 +165,7 @@ jobs:
           from openai import OpenAI
 
           MODELL = "sonar"
-          CHUNK_MAX_WOERTER = 1500
+          CHUNK_MAX_WOERTER = 800
           PAUSE_ZWISCHEN_CHUNKS = 2
           RETRY_PAUSEN = [15, 30, 60]
 
@@ -176,21 +176,29 @@ jobs:
 
           text_path = Path("text/buch_glatt.txt")
           text = text_path.read_text(encoding="utf-8")
-          paragraphs = [p.strip() for p in re.split(r"\n{2,}", text) if p.strip()]
+
+          PARA_MARKER = "\u0001PARA\u0001"
+          text_mit_marker = re.sub(r"\n{2,}", f" {PARA_MARKER} ", text)
+          text_mit_marker = re.sub(r"\n", " ", text_mit_marker)
+
+          roheinheiten = re.split(r'(?<=[.!?])\s+', text_mit_marker)
+          einheiten = [u.strip() for u in roheinheiten if u.strip()]
 
           def wc(s): return len(re.findall(r"\S+", s))
 
           chunks, current, cur_w = [], [], 0
-          for p in paragraphs:
-              w = wc(p)
+          for u in einheiten:
+              w = wc(u)
               if current and cur_w + w > CHUNK_MAX_WOERTER:
-                  chunks.append("\n\n".join(current)); current, cur_w = [p], w
+                  chunks.append(" ".join(current)); current, cur_w = [u], w
               else:
-                  current.append(p); cur_w += w
-          if current: chunks.append("\n\n".join(current))
+                  current.append(u); cur_w += w
+          if current: chunks.append(" ".join(current))
 
           system_prompt = (
-              "Überarbeite den folgenden deutschen Buchtext ausschließlich für Text-to-Speech.\n"
+              "Überarbeite den folgenden deutschen Buchtextausschnitt ausschließlich für Text-to-Speech.\n"
+              "Der Marker __PARA__ steht für einen Absatzumbruch, er MUSS in der Antwort exakt an "
+              "derselben Stelle als eigenständiges Wort __PARA__ erhalten bleiben.\n"
               "Regeln:\n"
               "1. Lange Sätze in kürzere Hauptsätze aufteilen (max 20 Wörter).\n"
               "2. Sehr kurze Sätze (unter 5 Wörter) mit Nachbarsatz verbinden.\n"
@@ -200,14 +208,14 @@ jobs:
               "6. Abkürzungen ausschreiben (z.B. -> zum Beispiel, u.a. -> unter anderem, "
               "d.h. -> das heißt, bzw. -> beziehungsweise, usw. -> und so weiter, "
               "etc. -> und so weiter, ggf. -> gegebenenfalls, ca. -> circa).\n"
-              "7. Ordinalzahlen vor Substantiven ausschreiben (19. Jahrhundert -> neunzehnten Jahrhundert).\n"
-              "8. Absatzstruktur beibehalten, keine Kürzungen, keine Kommentare.\n"
+              "7. Ordinalzahlen vor Substantiven ausschreiben (19. Jahrhundert -> neunzehnten Jahrhundert, "
+              "im 16. Jahrhundert -> im sechzehnten Jahrhundert).\n"
+              "8. Keine Kürzungen, keine Kommentare, keine Einleitung.\n"
               "9. TTS-störende Elemente entfernen oder integrieren: Fußnotennummern, "
               "Klammerverweise, Sonderzeichen, Semikolons als Aufzählungszeichen. "
               "Nur weglassen wenn dabei inhaltlich nichts verloren geht, im Zweifel "
               "behutsam umformulieren statt ersatzlos streichen.\n"
-              "10. Gib ausschließlich den überarbeiteten Text zurück, keine Einleitung, "
-              "keine Erklärungen, keine Kommentare."
+              "10. Gib ausschließlich den überarbeiteten Text zurück."
           )
 
           out_chunks, report, failed = [], [f"Modell: {MODELL}", f"Chunks gesamt: {len(chunks)}",
@@ -215,7 +223,8 @@ jobs:
                                              f"Pause zwischen Chunks: {PAUSE_ZWISCHEN_CHUNKS}s"], []
 
           for idx, chunk in enumerate(chunks, start=1):
-              chunk_words = wc(chunk)
+              chunk_sendbar = chunk.replace(PARA_MARKER, "__PARA__")
+              chunk_words = wc(chunk_sendbar)
               success = False
               last_err = ""
 
@@ -228,7 +237,7 @@ jobs:
                           model=MODELL,
                           messages=[
                               {"role": "system", "content": system_prompt},
-                              {"role": "user", "content": chunk},
+                              {"role": "user", "content": chunk_sendbar},
                           ],
                           temperature=0.2,
                           max_tokens=8192,
@@ -236,8 +245,9 @@ jobs:
                       result = (resp.choices[0].message.content or "").strip()
                       if not result:
                           raise ValueError("Leere Antwort")
-                      if wc(result) < int(chunk_words * 0.75):
+                      if wc(result) < int(chunk_words * 0.6):
                           raise ValueError(f"zu kurz: {chunk_words} -> {wc(result)}")
+                      result = result.replace("__PARA__", PARA_MARKER)
                       out_chunks.append(result)
                       report.append(f"Chunk {idx:04d}: OK ({chunk_words} -> {wc(result)} Wörter)")
                       success = True
@@ -254,7 +264,10 @@ jobs:
               if idx < len(chunks):
                   time.sleep(PAUSE_ZWISCHEN_CHUNKS)
 
-          text_path.write_text("\n\n".join(out_chunks).strip() + "\n", encoding="utf-8")
+          endtext = " ".join(out_chunks)
+          endtext = re.sub(rf"\s*{re.escape(PARA_MARKER)}\s*", "\n\n", endtext)
+          endtext = re.sub(r"[ \t]+", " ", endtext).strip()
+          text_path.write_text(endtext + "\n", encoding="utf-8")
           report.append(f"\nFehlgeschlagene Chunks: {failed if failed else 'keine'}")
           report.append(f"Erfolgreich: {len(chunks) - len(failed)} / {len(chunks)}")
           Path("output/meta/02_glaettung.txt").write_text("\n".join(report) + "\n", encoding="utf-8")
@@ -270,6 +283,8 @@ jobs:
 
           text_path = Path("text/buch_glatt.txt")
           text = text_path.read_text(encoding="utf-8")
+
+          MARKER_WEICH = "\u2063"
 
           def entferne_quellenverweise(t):
               t = re.sub(r"[\u00b9\u00b2\u00b3\u2070\u2074-\u2079]+", "", t)
@@ -314,7 +329,12 @@ jobs:
           text = grundhaertung(text)
           absaetze = [re.sub(r"\s+", " ", p).strip() for p in re.split(r"\n{2,}", text) if p.strip()]
 
-          MIN_Z, MAX_Z = 40, 100
+          MIN_Z, MAX_Z = 50, 160
+
+          KONJ_MUSTER = re.compile(
+              r',\s+(?=(?:und|aber|oder|doch|sondern|denn|dass|weil|während|obwohl|'
+              r'wenn|als|damit|jedoch|allerdings|sodass|indem|sobald|nachdem)\b)'
+          )
 
           def satzzeichen(s):
               s = s.strip()
@@ -326,29 +346,33 @@ jobs:
               if len(satz) <= max_z: return [satz]
               endzeichen = satz[-1] if satz and satz[-1] in ".!?" else "."
               kern = satz[:-1] if satz and satz[-1] in ".!?" else satz
-              teile = re.split(r',\s+', kern)
+
+              natuerliche_teile = KONJ_MUSTER.split(kern)
               erg, akt = [], ""
-              for teil in teile:
+              for i, teil in enumerate(natuerliche_teile):
                   kand = akt + (", " if akt else "") + teil
                   if len(kand) <= max_z:
                       akt = kand
+                      continue
+                  if akt:
+                      erg.append(akt.strip() + ",")
+                      akt = ""
+                  if len(teil) <= max_z:
+                      akt = teil
                   else:
-                      if akt: erg.append(akt.strip() + ",")
-                      if len(teil) > max_z:
-                          woerter, zeile = teil.split(), ""
-                          for w in woerter:
-                              k2 = zeile + (" " if zeile else "") + w
-                              if len(k2) <= max_z: zeile = k2
-                              else:
-                                  if zeile: erg.append(zeile.strip() + ",")
-                                  zeile = w
-                          akt = zeile
-                      else:
-                          akt = teil
+                      woerter, zeile = teil.split(), ""
+                      for w in woerter:
+                          k2 = zeile + (" " if zeile else "") + w
+                          if len(k2) <= max_z:
+                              zeile = k2
+                          else:
+                              if zeile: erg.append(zeile.strip() + MARKER_WEICH)
+                              zeile = w
+                      akt = zeile
               if akt:
                   erg.append(akt.strip() + endzeichen)
               elif erg:
-                  erg[-1] = erg[-1].rstrip(",") + endzeichen
+                  erg[-1] = erg[-1].rstrip(",").rstrip(MARKER_WEICH) + endzeichen
               return erg if erg else [satz[:max_z] + endzeichen]
 
           def fuehre_zusammen(saetze, min_z, max_z):
@@ -405,7 +429,8 @@ jobs:
               f"Zeilen nach Haertung: {len(nicht_leer)}\n"
               f"Zeilen unter {MIN_Z} Zeichen: {sum(1 for z in nicht_leer if len(z) < MIN_Z)}\n"
               f"Zeilen ueber {MAX_Z} Zeichen: {sum(1 for z in nicht_leer if len(z) > MAX_Z)}\n"
-              f"Zeilen mit technischem Komma-Split (statt Punkt): {sum(1 for z in nicht_leer if z.endswith(','))}\n",
+              f"Zeilen mit echtem Komma-Split (natuerliche Konjunktion): {sum(1 for z in nicht_leer if z.endswith(','))}\n"
+              f"Zeilen mit technischem Wort-Split (unsichtbarer Marker, keine Sprechpause): {sum(1 for z in nicht_leer if MARKER_WEICH in z)}\n",
               encoding="utf-8"
           )
           PY
@@ -527,6 +552,8 @@ jobs:
           FINAL_MP3 = Path(f"output/audio/teil_{TEIL}.mp3")
           REPORT = Path(f"output/meta/qualitaet_teil_{TEIL}.txt")
 
+          MARKER_WEICH = "\u2063"
+
           VERSUCHE = [
               ["--length_scale", "1.20", "--noise_scale", "0.667", "--noise_w", "0.8", "--sentence_silence", "0.35"],
               ["--length_scale", "1.35", "--noise_scale", "0.667", "--noise_w", "0.8", "--sentence_silence", "0.35"],
@@ -535,8 +562,18 @@ jobs:
           MAX_CHARS_PRO_SEK = 22.0
           PAUSE_SATZENDE = 0.35
           PAUSE_KOMMA_SPLIT = 0.15
+          PAUSE_TECHNISCH = 0.05
 
-          lines = [l.strip() for l in TXT.read_text(encoding="utf-8").split("\n") if l.strip()]
+          rohzeilen = [l.strip() for l in TXT.read_text(encoding="utf-8").split("\n") if l.strip()]
+
+          def klassifiziere(zeile):
+              if MARKER_WEICH in zeile:
+                  return zeile.replace(MARKER_WEICH, ""), PAUSE_TECHNISCH
+              if zeile.endswith(","):
+                  return zeile, PAUSE_KOMMA_SPLIT
+              return zeile, PAUSE_SATZENDE
+
+          lines_mit_pause = [klassifiziere(z) for z in rohzeilen]
 
           def run_piper(text, out_wav, params):
               proc = subprocess.run(
@@ -553,16 +590,21 @@ jobs:
               if ch > 1: samples = samples[::ch]
               return samples, sr
 
-          report = [f"Teil {TEIL}: {len(lines)} Zeilen"]
+          report = [f"Teil {TEIL}: {len(lines_mit_pause)} Zeilen"]
           fixes = 0
           komma_splits = 0
+          technische_splits = 0
+          letzter_erfolgreicher_index = 0
           all_samples, sr_final = array.array("h"), 22050
 
-          for idx, line in enumerate(lines, start=1):
+          for idx, (line, pause) in enumerate(lines_mit_pause, start=1):
               tmp = Path(f"output/audio/tmp_{TEIL}_{idx:05d}.wav")
               beste_samples, beste_sr, beste_rate = None, None, 999.0
 
-              for v_idx, params in enumerate(VERSUCHE, start=1):
+              reihenfolge = sorted(range(len(VERSUCHE)), key=lambda i: (i != letzter_erfolgreicher_index, i))
+
+              for v_pos, v_idx in enumerate(reihenfolge, start=1):
+                  params = VERSUCHE[v_idx]
                   if not run_piper(line, tmp, params):
                       continue
                   samples, sr = wav_info(tmp)
@@ -571,9 +613,10 @@ jobs:
                   if beste_samples is None or rate < beste_rate:
                       beste_samples, beste_sr, beste_rate = samples, sr, rate
                   if dauer > 0 and rate <= MAX_CHARS_PRO_SEK:
-                      if v_idx > 1:
+                      if v_idx != letzter_erfolgreicher_index:
                           fixes += 1
-                          report.append(f"Zeile {idx:05d}: behoben in Versuch {v_idx} ({rate:.1f} Zeichen/Sek) -> {line[:60]}")
+                          report.append(f"Zeile {idx:05d}: Parameter gewechselt auf Versuch {v_idx+1} ({rate:.1f} Zeichen/Sek) -> {line[:60]}")
+                      letzter_erfolgreicher_index = v_idx
                       break
               tmp.unlink(missing_ok=True)
 
@@ -583,12 +626,12 @@ jobs:
 
               sr_final = beste_sr
               all_samples.extend(beste_samples)
-
-              ist_komma_split = line.rstrip().endswith(",")
-              pause = PAUSE_KOMMA_SPLIT if ist_komma_split else PAUSE_SATZENDE
-              if ist_komma_split:
-                  komma_splits += 1
               all_samples.extend(array.array("h", [0]) * int(sr_final * pause))
+
+              if pause == PAUSE_KOMMA_SPLIT:
+                  komma_splits += 1
+              elif pause == PAUSE_TECHNISCH:
+                  technische_splits += 1
 
               if beste_rate > MAX_CHARS_PRO_SEK:
                   report.append(f"Zeile {idx:05d}: weiterhin auffaellig ({beste_rate:.1f} Zeichen/Sek) -> {line[:60]}")
@@ -597,8 +640,9 @@ jobs:
               w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr_final)
               w.writeframes(all_samples.tobytes())
 
-          report.append(f"Anzahl automatisch korrigierter Zeilen: {fixes}")
-          report.append(f"Anzahl Komma-Split-Zeilen (kuerzere Pause 0.15s): {komma_splits}")
+          report.append(f"Anzahl Parameterwechsel (Tempo-Sprungpunkte): {fixes}")
+          report.append(f"Anzahl echter Komma-Split-Zeilen (Pause 0.15s): {komma_splits}")
+          report.append(f"Anzahl technischer Wort-Split-Zeilen (Pause 0.05s, kein Piper-Komma): {technische_splits}")
           REPORT.write_text("\n".join(report) + "\n", encoding="utf-8")
 
           subprocess.run(
