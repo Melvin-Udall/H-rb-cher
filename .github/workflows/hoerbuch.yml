@@ -160,7 +160,7 @@ jobs:
         shell: bash
         run: |
           cat > script_perplexity_rewrite.py <<'PY'
-          import os, re, time
+          import os, re, time, sys
           from pathlib import Path
           from openai import OpenAI
 
@@ -168,11 +168,17 @@ jobs:
           CHUNK_MAX_WOERTER = 800
           PAUSE_ZWISCHEN_CHUNKS = 2
           RETRY_PAUSEN = [15, 30, 60]
+          ANFRAGE_TIMEOUT_SEK = 60.0
 
           api_key = os.environ.get("PPLX_API_KEY", "").strip()
           if not api_key:
               raise SystemExit("Fehler: PPLX_API_KEY fehlt.")
-          client = OpenAI(api_key=api_key, base_url="https://api.perplexity.ai")
+          client = OpenAI(
+              api_key=api_key,
+              base_url="https://api.perplexity.ai",
+              timeout=ANFRAGE_TIMEOUT_SEK,
+              max_retries=0,
+          )
 
           text_path = Path("text/buch_glatt.txt")
           text = text_path.read_text(encoding="utf-8")
@@ -220,17 +226,24 @@ jobs:
 
           out_chunks, report, failed = [], [f"Modell: {MODELL}", f"Chunks gesamt: {len(chunks)}",
                                              f"Chunk-Grenze: {CHUNK_MAX_WOERTER} Wörter",
+                                             f"Anfrage-Timeout: {ANFRAGE_TIMEOUT_SEK}s",
                                              f"Pause zwischen Chunks: {PAUSE_ZWISCHEN_CHUNKS}s"], []
+
+          start_gesamt = time.time()
+          print(f"[START] {len(chunks)} Chunks insgesamt zu verarbeiten.", flush=True)
 
           for idx, chunk in enumerate(chunks, start=1):
               chunk_sendbar = chunk.replace(PARA_MARKER, "__PARA__")
               chunk_words = wc(chunk_sendbar)
               success = False
               last_err = ""
+              start_chunk = time.time()
 
               for attempt, wartezeit in enumerate([0] + RETRY_PAUSEN, start=1):
                   if wartezeit > 0:
-                      report.append(f"Chunk {idx:04d}: Wartezeit {wartezeit}s vor Versuch {attempt}...")
+                      msg = f"Chunk {idx:04d}/{len(chunks)}: Wartezeit {wartezeit}s vor Versuch {attempt}..."
+                      report.append(msg)
+                      print(f"[LAUFEND] {msg}", flush=True)
                       time.sleep(wartezeit)
                   try:
                       resp = client.chat.completions.create(
@@ -249,17 +262,26 @@ jobs:
                           raise ValueError(f"zu kurz: {chunk_words} -> {wc(result)}")
                       result = result.replace("__PARA__", PARA_MARKER)
                       out_chunks.append(result)
-                      report.append(f"Chunk {idx:04d}: OK ({chunk_words} -> {wc(result)} Wörter)")
+                      dauer_chunk = time.time() - start_chunk
+                      report.append(f"Chunk {idx:04d}: OK ({chunk_words} -> {wc(result)} Wörter, {dauer_chunk:.1f}s)")
                       success = True
                       break
                   except Exception as e:
                       last_err = str(e)
                       report.append(f"Chunk {idx:04d}: Versuch {attempt} fehlgeschlagen: {last_err[:150]}")
 
+              dauer_chunk = time.time() - start_chunk
+              dauer_gesamt = time.time() - start_gesamt
+
               if not success:
                   out_chunks.append(chunk)
                   failed.append(idx)
                   report.append(f"Chunk {idx:04d}: ALLE VERSUCHE FEHLGESCHLAGEN -> Original übernommen")
+                  print(f"[FEHLER] Chunk {idx:04d}/{len(chunks)} fehlgeschlagen "
+                        f"(Dauer: {dauer_chunk:.1f}s, Gesamt: {dauer_gesamt/60:.1f}min)", flush=True)
+              else:
+                  print(f"[OK] Chunk {idx:04d}/{len(chunks)} fertig "
+                        f"(Dauer: {dauer_chunk:.1f}s, Gesamt: {dauer_gesamt/60:.1f}min)", flush=True)
 
               if idx < len(chunks):
                   time.sleep(PAUSE_ZWISCHEN_CHUNKS)
@@ -270,9 +292,11 @@ jobs:
           text_path.write_text(endtext + "\n", encoding="utf-8")
           report.append(f"\nFehlgeschlagene Chunks: {failed if failed else 'keine'}")
           report.append(f"Erfolgreich: {len(chunks) - len(failed)} / {len(chunks)}")
+          report.append(f"Gesamtdauer: {(time.time() - start_gesamt)/60:.1f} Minuten")
           Path("output/meta/02_glaettung.txt").write_text("\n".join(report) + "\n", encoding="utf-8")
+          print(f"[FERTIG] Alle Chunks verarbeitet in {(time.time() - start_gesamt)/60:.1f} Minuten.", flush=True)
           PY
-          python3 script_perplexity_rewrite.py
+          python3 -u script_perplexity_rewrite.py
 
       - name: Text für Piper härten
         shell: bash
