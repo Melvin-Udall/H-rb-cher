@@ -177,6 +177,7 @@ jobs:
           PREIS_PRO_ANFRAGE = 0.005
           TOKENS_PRO_WORT = 1.3
           MAX_KOSTEN_USD = 3.00
+          MIN_LAENGE_ANTEIL = 0.50
 
           api_key = os.environ.get("PPLX_API_KEY", "").strip()
           if not api_key:
@@ -221,25 +222,29 @@ jobs:
 
           system_prompt = (
               "Überarbeite den folgenden deutschen Buchtextausschnitt ausschließlich für Text-to-Speech.\n"
+              "WICHTIGSTE REGEL: Die Antwort MUSS ungefähr die gleiche Wortanzahl wie die Eingabe haben "
+              "(mindestens 80 Prozent). Du schreibst den GESAMTEN Text um, du erstellst NIEMALS eine "
+              "Zusammenfassung, keine Kürzung, keine Verdichtung des Inhalts. Jeder Satz und jede Information "
+              "aus dem Original muss in der Antwort in ausgeschriebener Form vorhanden sein.\n"
               "Der Marker __PARA__ steht für einen Absatzumbruch, er MUSS in der Antwort exakt an "
               "derselben Stelle als eigenständiges Wort __PARA__ erhalten bleiben.\n"
               "Regeln:\n"
-              "1. Lange Sätze in kürzere Hauptsätze aufteilen (max 20 Wörter).\n"
+              "1. Lange Sätze in kürzere Hauptsätze aufteilen (max 20 Wörter), NICHTS weglassen dabei.\n"
               "2. Sehr kurze Sätze (unter 5 Wörter) mit Nachbarsatz verbinden.\n"
               "3. Doppelpunkte, die Hauptsätze einleiten, in Punkt umwandeln.\n"
-              "4. Gedankenstrich-Einschübe auflösen, normale Sätze daraus machen.\n"
+              "4. Gedankenstrich-Einschübe auflösen, normale Sätze daraus machen, Inhalt beibehalten.\n"
               "5. Nur Punkt, Komma, Fragezeichen, Ausrufezeichen verwenden.\n"
               "6. Abkürzungen ausschreiben (z.B. -> zum Beispiel, u.a. -> unter anderem, "
               "d.h. -> das heißt, bzw. -> beziehungsweise, usw. -> und so weiter, "
               "etc. -> und so weiter, ggf. -> gegebenenfalls, ca. -> circa).\n"
               "7. Ordinalzahlen vor Substantiven ausschreiben (19. Jahrhundert -> neunzehnten Jahrhundert, "
               "im 16. Jahrhundert -> im sechzehnten Jahrhundert).\n"
-              "8. Keine Kürzungen, keine Kommentare, keine Einleitung.\n"
+              "8. Keine Kommentare, keine Einleitung, keine Erklärung deiner Änderungen.\n"
               "9. TTS-störende Elemente entfernen oder integrieren: Fußnotennummern, "
               "Klammerverweise, Sonderzeichen, Semikolons als Aufzählungszeichen. "
-              "Nur weglassen wenn dabei inhaltlich nichts verloren geht, im Zweifel "
-              "behutsam umformulieren statt ersatzlos streichen.\n"
-              "10. Gib ausschließlich den überarbeiteten Text zurück."
+              "Nur weglassen wenn es sich um reine Verweiszeichen ohne Inhalt handelt, "
+              "sonst behutsam in normalen Fließtext umformulieren statt zu streichen.\n"
+              "10. Gib ausschließlich den vollständig überarbeiteten Text zurück, in voller Länge."
           )
 
           out_chunks, report, failed = [], [f"Modell: {MODELL}", f"Chunks gesamt: {len(chunks)}",
@@ -247,6 +252,7 @@ jobs:
                                              f"Anfrage-Timeout: {ANFRAGE_TIMEOUT_SEK}s",
                                              f"Max. Anfragen gesamt (hartes Limit): {MAX_ANFRAGEN_GESAMT}",
                                              f"Max. Kosten (hartes Limit): {MAX_KOSTEN_USD} USD",
+                                             f"Min. Laengenanteil der Antwort: {MIN_LAENGE_ANTEIL*100:.0f}%",
                                              f"Pause zwischen Chunks: {PAUSE_ZWISCHEN_CHUNKS}s"], []
 
           def abbruch_limit(grund):
@@ -280,6 +286,7 @@ jobs:
                   if kosten_gesamt_usd >= MAX_KOSTEN_USD:
                       abbruch_limit(f"Kostenlimit erreicht ({MAX_KOSTEN_USD} USD) bei Chunk {idx:04d}, Versuch {attempt}.")
 
+                  antwort_wc = 0
                   try:
                       resp = client.chat.completions.create(
                           model=MODELL,
@@ -290,27 +297,28 @@ jobs:
                           temperature=0.2,
                           max_tokens=8192,
                       )
-                      anzahl_anfragen_gesamt += 1
                       result = (resp.choices[0].message.content or "").strip()
-                      kosten_gesamt_usd += schaetze_kosten(chunk_words, wc(result))
+                      antwort_wc = wc(result)
 
                       if not result:
                           raise ValueError("Leere Antwort")
-                      if wc(result) < int(chunk_words * 0.6):
-                          raise ValueError(f"zu kurz: {chunk_words} -> {wc(result)}")
+                      if antwort_wc < int(chunk_words * MIN_LAENGE_ANTEIL):
+                          raise ValueError(f"zu kurz: {chunk_words} -> {antwort_wc}")
+
                       result = result.replace("__PARA__", PARA_MARKER)
                       out_chunks.append(result)
                       dauer_chunk = time.time() - start_chunk
-                      report.append(f"Chunk {idx:04d}: OK ({chunk_words} -> {wc(result)} Wörter, {dauer_chunk:.1f}s)")
+                      report.append(f"Chunk {idx:04d}: OK ({chunk_words} -> {antwort_wc} Wörter, {dauer_chunk:.1f}s)")
                       success = True
                       break
                   except Exception as e:
-                      anzahl_anfragen_gesamt += 1
-                      kosten_gesamt_usd += schaetze_kosten(chunk_words, 0)
                       last_err = f"{type(e).__name__}: {e}"
                       report.append(f"Chunk {idx:04d}: Versuch {attempt} fehlgeschlagen: {last_err[:300]}")
                       print(f"[VERSUCH-FEHLER] Chunk {idx:04d}/{len(chunks)} Versuch {attempt}: {last_err[:300]} "
-                            f"(Anfragen bisher: {anzahl_anfragen_gesamt}, Kosten ca. {kosten_gesamt_usd:.2f} USD)", flush=True)
+                            f"(Anfragen bisher: {anzahl_anfragen_gesamt + 1}, Kosten ca. {kosten_gesamt_usd + schaetze_kosten(chunk_words, antwort_wc):.2f} USD)", flush=True)
+                  finally:
+                      anzahl_anfragen_gesamt += 1
+                      kosten_gesamt_usd += schaetze_kosten(chunk_words, antwort_wc)
 
               dauer_chunk = time.time() - start_chunk
               dauer_gesamt = time.time() - start_gesamt
@@ -327,8 +335,7 @@ jobs:
                   if folgefehler >= MAX_FOLGEFEHLER:
                       abbruch_limit(
                           f"{folgefehler} Chunks in Folge komplett fehlgeschlagen. "
-                          f"Letzter Fehler: {last_err[:300]}. Vermutlich Auth- oder Guthaben-Problem "
-                          f"bei PPLX_API_KEY, keine reinen Netzwerkaussetzer."
+                          f"Letzter Fehler: {last_err[:300]}."
                       )
               else:
                   folgefehler = 0
