@@ -416,7 +416,7 @@ jobs:
           text = grundhaertung(text)
           absaetze = [re.sub(r"\s+", " ", p).strip() for p in re.split(r"\n{2,}", text) if p.strip()]
 
-          MIN_Z, MAX_Z = 50, 160
+          MIN_Z, MAX_Z = 40, 115
 
           KONJ_MUSTER = re.compile(
               r',\s+(?=(?:und|aber|oder|doch|sondern|denn|dass|weil|während|obwohl|'
@@ -642,14 +642,14 @@ jobs:
           MARKER_WEICH = "\u2063"
 
           VERSUCHE = [
-              ["--length_scale", "1.20", "--noise_scale", "0.667", "--noise_w", "0.8", "--sentence_silence", "0.35"],
-              ["--length_scale", "1.35", "--noise_scale", "0.667", "--noise_w", "0.8", "--sentence_silence", "0.35"],
-              ["--length_scale", "1.50", "--noise_scale", "0.667", "--noise_w", "0.9", "--sentence_silence", "0.35"],
+              ["--length_scale", "1.35", "--noise_scale", "0.667", "--noise_w", "0.8", "--sentence_silence", "0.40"],
+              ["--length_scale", "1.50", "--noise_scale", "0.667", "--noise_w", "0.8", "--sentence_silence", "0.40"],
+              ["--length_scale", "1.65", "--noise_scale", "0.667", "--noise_w", "0.9", "--sentence_silence", "0.40"],
           ]
-          MAX_CHARS_PRO_SEK = 22.0
-          PAUSE_SATZENDE = 0.35
-          PAUSE_KOMMA_SPLIT = 0.15
-          PAUSE_TECHNISCH = 0.05
+          MAX_CHARS_PRO_SEK = 15.0
+          PAUSE_SATZENDE = 0.40
+          PAUSE_KOMMA_SPLIT = 0.20
+          PAUSE_TECHNISCH = 0.10
 
           rohzeilen = [l.strip() for l in TXT.read_text(encoding="utf-8").split("\n") if l.strip()]
 
@@ -728,8 +728,8 @@ jobs:
               w.writeframes(all_samples.tobytes())
 
           report.append(f"Anzahl Parameterwechsel (Tempo-Sprungpunkte): {fixes}")
-          report.append(f"Anzahl echter Komma-Split-Zeilen (Pause 0.15s): {komma_splits}")
-          report.append(f"Anzahl technischer Wort-Split-Zeilen (Pause 0.05s, kein Piper-Komma): {technische_splits}")
+          report.append(f"Anzahl echter Komma-Split-Zeilen (Pause 0.20s): {komma_splits}")
+          report.append(f"Anzahl technischer Wort-Split-Zeilen (Pause 0.10s, kein Piper-Komma): {technische_splits}")
           REPORT.write_text("\n".join(report) + "\n", encoding="utf-8")
 
           subprocess.run(
