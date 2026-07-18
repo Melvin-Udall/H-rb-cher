@@ -499,48 +499,79 @@ jobs:
           BASE_URL = f"http://{PUBLIC_IP}:{MAPPED_PORT}"
           SPRACHE = "de"
           SPRECHER = "male_de_1"
+          INAKTIVITAETS_LIMIT_SEK = 600
 
           PARTS_DIR = Path("output/parts")
           AUDIO_DIR = Path("output/audio"); AUDIO_DIR.mkdir(parents=True, exist_ok=True)
           META = Path("output/meta")
 
+          print(f"[INFO] Verbinde zu {BASE_URL}", flush=True)
+          print(f"[INFO] Inaktivitaets-Limit: {INAKTIVITAETS_LIMIT_SEK}s ohne Fortschritt -> Abbruch", flush=True)
+
+          try:
+              test_resp = requests.get(f"{BASE_URL}/speakers_list", timeout=30)
+              print(f"[INFO] Test /speakers_list -> HTTP {test_resp.status_code}: {test_resp.text[:500]}", flush=True)
+          except Exception as e:
+              print(f"[WARNUNG] Test /speakers_list fehlgeschlagen: {e}", flush=True)
+
           teile = sorted(PARTS_DIR.glob("teil_*.txt"))
           if not teile:
               raise SystemExit("Fehler: Keine Textteile gefunden.")
+
+          letzter_fortschritt = time.time()
+
+          def pruefe_inaktivitaet():
+              inaktiv_seit = time.time() - letzter_fortschritt
+              if inaktiv_seit > INAKTIVITAETS_LIMIT_SEK:
+                  print(f"[ABBRUCH-INAKTIVITAET] Seit {inaktiv_seit:.0f}s kein Fortschritt mehr (Limit: {INAKTIVITAETS_LIMIT_SEK}s). Breche Lauf ab.", flush=True)
+                  sys.exit(1)
 
           for teil_pfad in teile:
               teil_nr = teil_pfad.stem.split("_")[1]
               zeilen = [z.strip() for z in teil_pfad.read_text(encoding="utf-8").split("\n") if z.strip()]
               report = [f"Teil {teil_nr}: {len(zeilen)} Zeilen, XTTS-v2 ueber {BASE_URL}"]
+              print(f"[START] Teil {teil_nr}: {len(zeilen)} Zeilen zu verarbeiten.", flush=True)
 
               wav_teile = []
               for idx, zeile in enumerate(zeilen, start=1):
+                  pruefe_inaktivitaet()
                   fehlversuche = 0
                   erfolgreich = False
                   while fehlversuche < 3 and not erfolgreich:
+                      pruefe_inaktivitaet()
+                      t0 = time.time()
                       try:
                           resp = requests.post(
                               f"{BASE_URL}/tts_to_audio/",
                               json={"text": zeile, "speaker_wav": SPRECHER, "language": SPRACHE},
                               timeout=120,
                           )
+                          dauer = time.time() - t0
                           if resp.status_code == 200 and resp.content:
                               out_wav = AUDIO_DIR / f"tmp_{teil_nr}_{idx:05d}.wav"
                               out_wav.write_bytes(resp.content)
                               wav_teile.append(out_wav)
                               erfolgreich = True
+                              letzter_fortschritt = time.time()
+                              print(f"[OK] Teil {teil_nr} Zeile {idx}/{len(zeilen)} ({dauer:.1f}s)", flush=True)
                           else:
-                              raise ValueError(f"HTTP {resp.status_code}")
+                              raise ValueError(f"HTTP {resp.status_code}: {resp.text[:300]}")
                       except Exception as e:
                           fehlversuche += 1
-                          report.append(f"Zeile {idx:05d}: Versuch {fehlversuche} fehlgeschlagen: {e}")
-                          time.sleep(5)
+                          dauer = time.time() - t0
+                          fehlertext = f"Zeile {idx}/{len(zeilen)} Versuch {fehlversuche}/3 fehlgeschlagen nach {dauer:.1f}s: {type(e).__name__}: {e}"
+                          report.append(fehlertext)
+                          print(f"[FEHLER] Teil {teil_nr} {fehlertext}", flush=True)
+                          if fehlversuche < 3:
+                              time.sleep(5)
                   if not erfolgreich:
+                      print(f"[UEBERSPRUNGEN] Teil {teil_nr} Zeile {idx}: alle Versuche fehlgeschlagen -> '{zeile[:60]}'", flush=True)
                       report.append(f"Zeile {idx:05d}: ALLE VERSUCHE FEHLGESCHLAGEN, uebersprungen -> {zeile[:60]}")
-                  else:
-                      print(f"[OK] Teil {teil_nr} Zeile {idx}/{len(zeilen)}", flush=True)
+                      letzter_fortschritt = time.time()
 
               if not wav_teile:
+                  print(f"[ABBRUCH] Teil {teil_nr} hat keine erfolgreichen Audiozeilen.", flush=True)
+                  (META / f"qualitaet_teil_{teil_nr}.txt").write_text("\n".join(report) + "\n", encoding="utf-8")
                   raise SystemExit(f"Fehler: Teil {teil_nr} hat keine erfolgreichen Audiozeilen.")
 
               liste_datei = AUDIO_DIR / f"concat_{teil_nr}.txt"
@@ -563,7 +594,7 @@ jobs:
 
               report.append(f"Erfolgreiche Zeilen: {len(wav_teile)} / {len(zeilen)}")
               (META / f"qualitaet_teil_{teil_nr}.txt").write_text("\n".join(report) + "\n", encoding="utf-8")
-              print(f"[FERTIG] Teil {teil_nr} abgeschlossen.", flush=True)
+              print(f"[FERTIG] Teil {teil_nr} abgeschlossen. Erfolgreich: {len(wav_teile)}/{len(zeilen)}", flush=True)
           PY
           pip install --no-cache-dir requests
           python3 -u script_xtts_synthese.py
