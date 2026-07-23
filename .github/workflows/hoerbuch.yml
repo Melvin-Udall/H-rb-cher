@@ -526,6 +526,16 @@ jobs:
               print("[FEHLER] Container konnte nicht neu gestartet werden.", flush=True)
               return False
 
+          def datei_ist_gueltiges_mp3(pfad):
+              try:
+                  r = subprocess.run(
+                      ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(pfad)],
+                      capture_output=True, text=True, timeout=15
+                  )
+                  return r.returncode == 0 and r.stdout.strip() != ""
+              except Exception:
+                  return False
+
           teil_dateien = []
           for idx, zeile in enumerate(zeilen, start=1):
               pruefe_inaktivitaet()
@@ -549,6 +559,9 @@ jobs:
                       if resp.status_code == 200 and resp.content:
                           out_mp3 = AUDIO_DIR / f"tmp_{TEIL_NR}_{idx:05d}.mp3"
                           out_mp3.write_bytes(resp.content)
+                          if not datei_ist_gueltiges_mp3(out_mp3):
+                              out_mp3.unlink(missing_ok=True)
+                              raise ValueError("Erhaltene Audiodatei ist kein gueltiges MP3 (ffprobe-Pruefung fehlgeschlagen)")
                           teil_dateien.append(out_mp3)
                           erfolgreich = True
                           letzter_fortschritt = time.time()
@@ -575,10 +588,18 @@ jobs:
               "\n".join(f"file '{p.resolve()}'" for p in teil_dateien), encoding="utf-8"
           )
           final_mp3 = AUDIO_DIR / f"teil_{TEIL_NR}.mp3"
-          subprocess.run(
-              ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(liste_datei), "-c", "copy", str(final_mp3)],
-              capture_output=True
+          # Neu kodieren statt "-c copy", da einzelne MP3-Antworten der API
+          # inkonsistente Header haben koennen, was reines Kopieren zerstoert.
+          ergebnis = subprocess.run(
+              ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(liste_datei),
+               "-codec:a", "libmp3lame", "-qscale:a", "2", str(final_mp3)],
+              capture_output=True, text=True
           )
+          if ergebnis.returncode != 0 or not final_mp3.exists() or final_mp3.stat().st_size == 0:
+              report.append(f"FFMPEG-FEHLER beim Zusammenfuegen von Teil {TEIL_NR}: {ergebnis.stderr[-1500:]}")
+              (META / f"qualitaet_teil_{TEIL_NR}.txt").write_text("\n".join(report) + "\n", encoding="utf-8")
+              raise SystemExit(f"Fehler: ffmpeg konnte Teil {TEIL_NR} nicht zusammenfuegen.")
+
           for p in teil_dateien: p.unlink(missing_ok=True)
           liste_datei.unlink(missing_ok=True)
 
@@ -690,13 +711,26 @@ jobs:
       - name: Gesamt-MP3 erzeugen
         shell: bash
         run: |
+          for f in output/audio/teil_*.mp3; do
+            if ! ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$f" > /dev/null 2>&1; then
+              echo "WARNUNG: $f ist keine gueltige Audiodatei und wird ausgeschlossen." >&2
+              mv "$f" "$f.ungueltig"
+            fi
+          done
           ls output/audio/teil_*.mp3 | sort > output/meta/mp3_list_raw.txt
+          if [ ! -s output/meta/mp3_list_raw.txt ]; then
+            echo "Fehler: Keine gueltigen MP3-Teile gefunden." >&2
+            exit 1
+          fi
           BASE="$(pwd)"
           awk -v base="$BASE" '{print "file '\''" base "/" $0 "'\''"}' output/meta/mp3_list_raw.txt > output/meta/concat.txt
+          # Neu kodieren statt "-c copy", da die Teil-MP3s aus unterschiedlichen
+          # ffmpeg-Laeufen stammen und leicht abweichende Header haben koennen.
           ffmpeg -y -f concat -safe 0 -i output/meta/concat.txt \
+            -codec:a libmp3lame -qscale:a 2 \
             -metadata comment="Erstellt von Melvin-Udall - Hoerbuecher Projekt" \
             -metadata artist="Melvin-Udall" \
-            -c copy output/hoerbuch_gesamt.mp3
+            output/hoerbuch_gesamt.mp3
 
       - name: Dateien für Release vorbereiten
         shell: bash
