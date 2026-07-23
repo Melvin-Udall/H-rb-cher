@@ -390,7 +390,7 @@ jobs:
     strategy:
       matrix:
         teil: ${{ fromJson(needs.textaufbereitung.outputs.matrix) }}
-      max-parallel: 6
+      max-parallel: 2
       fail-fast: false
     steps:
       - name: Textteile herunterladen
@@ -423,9 +423,11 @@ jobs:
         shell: bash
         run: |
           docker run -d --name kokoro-onnx \
+            --memory="4g" \
+            --restart=unless-stopped \
             -p 8881:8881 \
-            -e KOKORO_ONNX_THREADS=2 \
-            -e KOKORO_ONNX_INTRA_OP_THREADS=2 \
+            -e KOKORO_ONNX_THREADS=1 \
+            -e KOKORO_ONNX_INTRA_OP_THREADS=1 \
             -e KOKORO_ONNX_INTER_OP_THREADS=1 \
             -e KOKORO_ONNX_EXECUTION_MODE=sequential \
             -e KOKORO_ONNX_GRAPH_OPT=all \
@@ -433,9 +435,9 @@ jobs:
             -e KOKORO_ONNX_TRIM=true \
             -e KOKORO_ONNX_VOICE=martin \
             -e KOKORO_ONNX_LANG=de \
-            -e OMP_NUM_THREADS=2 \
+            -e OMP_NUM_THREADS=1 \
             -e KOKORO_PAUSE_DURATION=0.3 \
-            -e KOKORO_WORKERS=2 \
+            -e KOKORO_WORKERS=1 \
             -e KOKORO_WARMUP_TEXT="Hallo." \
             kokoro-onnx-de
 
@@ -478,12 +480,46 @@ jobs:
                   print(f"[ABBRUCH-INAKTIVITAET] Kein Fortschritt seit {INAKTIVITAETS_LIMIT_SEK}s. Breche ab.", flush=True)
                   sys.exit(1)
 
+          def container_laeuft():
+              try:
+                  r = subprocess.run(
+                      ["docker", "inspect", "-f", "{{.State.Running}}", "kokoro-onnx"],
+                      capture_output=True, text=True, timeout=10
+                  )
+                  return r.stdout.strip() == "true"
+              except Exception:
+                  return False
+
+          def container_neustarten():
+              print("[WARNUNG] Container laeuft nicht mehr. Zeige letzte Logs:", flush=True)
+              logs = subprocess.run(["docker", "logs", "--tail", "50", "kokoro-onnx"], capture_output=True, text=True)
+              print(logs.stdout[-3000:], flush=True)
+              print(logs.stderr[-3000:], flush=True)
+              subprocess.run(["docker", "start", "kokoro-onnx"], capture_output=True)
+              for i in range(20):
+                  time.sleep(3)
+                  try:
+                      r = requests.get(f"{BASE_URL}/v1/audio/voices", timeout=5)
+                      if r.status_code == 200:
+                          print("[INFO] Container erfolgreich neu gestartet.", flush=True)
+                          return True
+                  except Exception:
+                      pass
+              print("[FEHLER] Container konnte nicht neu gestartet werden.", flush=True)
+              return False
+
           teil_dateien = []
           for idx, zeile in enumerate(zeilen, start=1):
               pruefe_inaktivitaet()
+              if not container_laeuft():
+                  container_neustarten()
               fehlversuche = 0
               erfolgreich = False
               while fehlversuche < 3 and not erfolgreich:
+                  if not container_laeuft():
+                      if not container_neustarten():
+                          fehlversuche = 3
+                          break
                   t0 = time.time()
                   try:
                       resp = requests.post(
@@ -506,7 +542,7 @@ jobs:
                       report.append(f"Zeile {idx}/{len(zeilen)} Versuch {fehlversuche}/3 fehlgeschlagen: {type(e).__name__}: {e}")
                       print(f"[FEHLER] Teil {TEIL_NR} Zeile {idx} Versuch {fehlversuche}/3: {e}", flush=True)
                       if fehlversuche < 3:
-                          time.sleep(3)
+                          time.sleep(5)
               if not erfolgreich:
                   print(f"[UEBERSPRUNGEN] Teil {TEIL_NR} Zeile {idx}: alle Versuche fehlgeschlagen -> '{zeile[:60]}'", flush=True)
                   report.append(f"Zeile {idx:05d}: ALLE VERSUCHE FEHLGESCHLAGEN, uebersprungen -> {zeile[:60]}")
@@ -535,6 +571,13 @@ jobs:
           pip install --no-cache-dir requests
           python3 -u script_kokoro_synthese.py
 
+      - name: Docker-Logs bei Fehler sichern
+        if: failure()
+        shell: bash
+        run: |
+          mkdir -p output/meta
+          docker logs kokoro-onnx > output/meta/docker_log_teil_${{ matrix.teil }}.txt 2>&1 || true
+
       - name: Kokoro-Container stoppen
         if: always()
         shell: bash
@@ -554,6 +597,14 @@ jobs:
         with:
           name: qualitaet-teil-${{ matrix.teil }}
           path: output/meta/qualitaet_teil_*.txt
+          retention-days: 7
+
+      - name: Docker-Fehlerlog als Artefakt hochladen
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-log-teil-${{ matrix.teil }}
+          path: output/meta/docker_log_teil_*.txt
           retention-days: 7
 
   zusammenfuegen:
