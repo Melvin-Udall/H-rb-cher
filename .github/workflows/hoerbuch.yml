@@ -411,6 +411,7 @@ jobs:
           git clone https://huggingface.co/Godelaune/Kokoro-82M-ONNX-German-Martin kokoro_repo
           ls -la kokoro_repo
           ls -la kokoro_repo/onnx-docker
+          test -f kokoro_repo/german_text_rules.py && echo "german_text_rules.py gefunden" || echo "WARNUNG: german_text_rules.py fehlt im Repo"
 
       - name: Kokoro-Docker-Image bauen
         shell: bash
@@ -422,12 +423,14 @@ jobs:
         id: kokoro
         shell: bash
         run: |
+          cd kokoro_repo
           docker run -d --name kokoro-onnx \
             --memory="4g" \
             --restart=unless-stopped \
             -p 8881:8881 \
-            -e KOKORO_ONNX_THREADS=1 \
-            -e KOKORO_ONNX_INTRA_OP_THREADS=1 \
+            -v "$(pwd)/german_text_rules.py:/app/german_text_rules.py:ro" \
+            -e KOKORO_ONNX_THREADS=2 \
+            -e KOKORO_ONNX_INTRA_OP_THREADS=2 \
             -e KOKORO_ONNX_INTER_OP_THREADS=1 \
             -e KOKORO_ONNX_EXECUTION_MODE=sequential \
             -e KOKORO_ONNX_GRAPH_OPT=all \
@@ -435,21 +438,36 @@ jobs:
             -e KOKORO_ONNX_TRIM=true \
             -e KOKORO_ONNX_VOICE=martin \
             -e KOKORO_ONNX_LANG=de \
-            -e OMP_NUM_THREADS=1 \
+            -e OMP_NUM_THREADS=2 \
             -e KOKORO_PAUSE_DURATION=0.3 \
             -e KOKORO_WORKERS=1 \
+            -e KOKORO_ONNX_ALLOW_SPINNING=0 \
             -e KOKORO_WARMUP_TEXT="Hallo." \
             kokoro-onnx-de
 
+          echo "Warte 10 Sekunden und prüfe Container-Status..."
+          sleep 10
+          docker ps -a
+          echo "--- Docker-Logs (erste Sekunden nach Start) ---"
+          docker logs kokoro-onnx
+
           echo "Warte auf Kokoro-Service..."
+          BEREIT=0
           for i in $(seq 1 40); do
             if curl -s -o /dev/null -w "%{http_code}" http://localhost:8881/v1/audio/voices | grep -q "200"; then
               echo "Kokoro-Service ist bereit."
+              BEREIT=1
               break
             fi
             echo "Noch nicht bereit... ($i/40)"
             sleep 5
           done
+
+          if [ "$BEREIT" -eq 0 ]; then
+            echo "FEHLER: Kokoro-Service wurde nach 200 Sekunden nicht bereit. Vollständige Logs:"
+            docker logs kokoro-onnx
+            exit 1
+          fi
 
       - name: Textteil per Kokoro-Docker-Service vertonen
         shell: bash
@@ -492,7 +510,7 @@ jobs:
 
           def container_neustarten():
               print("[WARNUNG] Container laeuft nicht mehr. Zeige letzte Logs:", flush=True)
-              logs = subprocess.run(["docker", "logs", "--tail", "50", "kokoro-onnx"], capture_output=True, text=True)
+              logs = subprocess.run(["docker", "logs", "--tail", "80", "kokoro-onnx"], capture_output=True, text=True)
               print(logs.stdout[-3000:], flush=True)
               print(logs.stderr[-3000:], flush=True)
               subprocess.run(["docker", "start", "kokoro-onnx"], capture_output=True)
