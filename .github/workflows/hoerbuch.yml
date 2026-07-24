@@ -413,8 +413,10 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
-          pip install --no-cache-dir qwen-tts soundfile
+          pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install --no-cache-dir qwen-tts --no-deps
+          pip install --no-cache-dir soundfile numpy scipy einops safetensors huggingface_hub transformers accelerate
+          python3 -c "import torch, torchaudio; print('torch:', torch.__version__, '| torchaudio:', torchaudio.__version__); import torchaudio.compliance.kaldi; print('torchaudio-Erweiterung erfolgreich geladen.')"
 
       - name: Textteil per Qwen3-TTS vertonen
         shell: bash
