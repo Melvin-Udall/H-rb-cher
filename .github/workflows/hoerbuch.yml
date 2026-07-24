@@ -329,7 +329,6 @@ jobs:
           text = Path("text/buch_glatt.txt").read_text(encoding="utf-8")
           total_chars = len(text)
 
-          # Kleinere Teile als bei Kokoro, da Qwen3-TTS auf CPU RTF ~4.3x hat
           target, min_c, max_c = 25000, 12000, 35000
           est_parts = min(max(1, math.ceil(total_chars / target)), 20)
           target_chars = max(min_c, min(max_c, math.ceil(total_chars / est_parts)))
@@ -414,9 +413,8 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu
-          pip install --no-cache-dir qwen-tts --no-deps
-          pip install --no-cache-dir soundfile numpy scipy einops safetensors huggingface_hub transformers accelerate
-          python3 -c "import torch, torchaudio; print('torch:', torch.__version__, '| torchaudio:', torchaudio.__version__); import torchaudio.compliance.kaldi; print('torchaudio-Erweiterung erfolgreich geladen.')"
+          pip install --no-cache-dir qwen-tts
+          python3 -c "import torch, torchaudio; print('torch:', torch.__version__, '| torchaudio:', torchaudio.__version__); import torchaudio.compliance.kaldi; from qwen_tts import Qwen3TTSModel; print('Alle Importe erfolgreich.')"
 
       - name: Textteil per Qwen3-TTS vertonen
         shell: bash
