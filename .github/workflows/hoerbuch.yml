@@ -221,7 +221,7 @@ jobs:
 
           Path("output/meta/02_glaettung.txt").write_text(
               f"Methode: spaCy (de_core_news_sm), regelbasiert, deterministisch\n"
-              f"Max. Satzlaenge (Woerter): {MAX_SATZLAENGE_WOERTER} (gelockert fuer Kokoro)\n"
+              f"Max. Satzlaenge (Woerter): {MAX_SATZLAENGE_WOERTER}\n"
               f"Min. Satzlaenge (Woerter): {MIN_SATZLAENGE_WOERTER}\n"
               f"Saetze nach Glaettung: {len(ausgabe_saetze)}\n",
               encoding="utf-8"
@@ -229,7 +229,7 @@ jobs:
           PY
           python3 script_spacy_smooth.py
 
-      - name: Text für Kokoro leicht härten
+      - name: Text für Qwen3-TTS leicht härten
         shell: bash
         run: |
           cat > script_harden.py <<'PY'
@@ -273,7 +273,7 @@ jobs:
           text = leichte_haertung(text)
           absaetze = [re.sub(r"\s+", " ", p).strip() for p in re.split(r"\n{2,}", text) if p.strip()]
 
-          MAX_Z = 320
+          MAX_Z = 280
 
           def teile_lang(satz, max_z):
               if len(satz) <= max_z: return [satz]
@@ -308,9 +308,8 @@ jobs:
           text_path.write_text("\n".join(bereinigt) + "\n", encoding="utf-8")
           nicht_leer = [z for z in bereinigt if z]
           Path("output/meta/03_haertung.txt").write_text(
-              f"Zeilen nach Haertung (Saetze, fuer Kokoro): {len(nicht_leer)}\n"
-              f"Max. Zeichen pro Zeile: {MAX_Z}\n"
-              f"Hinweis: Leichte Haertung, Docker-Service normalisiert Zahlen/Einheiten zusaetzlich\n",
+              f"Zeilen nach Haertung (Saetze, fuer Qwen3-TTS): {len(nicht_leer)}\n"
+              f"Max. Zeichen pro Zeile: {MAX_Z}\n",
               encoding="utf-8"
           )
           PY
@@ -330,8 +329,9 @@ jobs:
           text = Path("text/buch_glatt.txt").read_text(encoding="utf-8")
           total_chars = len(text)
 
-          target, min_c, max_c = 90000, 40000, 120000
-          est_parts = min(max(1, math.ceil(total_chars / target)), 12)
+          # Kleinere Teile als bei Kokoro, da Qwen3-TTS auf CPU RTF ~4.3x hat
+          target, min_c, max_c = 25000, 12000, 35000
+          est_parts = min(max(1, math.ceil(total_chars / target)), 20)
           target_chars = max(min_c, min(max_c, math.ceil(total_chars / est_parts)))
 
           lines = text.split("\n")
@@ -390,7 +390,7 @@ jobs:
     strategy:
       matrix:
         teil: ${{ fromJson(needs.textaufbereitung.outputs.matrix) }}
-      max-parallel: 2
+      max-parallel: 3
       fail-fast: false
     steps:
       - name: Textteile herunterladen
@@ -399,185 +399,85 @@ jobs:
           name: text-teile
           path: output
 
+      - name: Python einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Systempakete installieren
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg git-lfs curl
-          git lfs install
+          sudo apt-get install -y ffmpeg
 
-      - name: Kokoro-Modellrepository klonen (inkl. Docker-Service)
+      - name: Qwen3-TTS installieren
         shell: bash
         run: |
-          git clone https://huggingface.co/Godelaune/Kokoro-82M-ONNX-German-Martin kokoro_repo
-          ls -la kokoro_repo
-          ls -la kokoro_repo/onnx-docker
-          test -f kokoro_repo/german_text_rules.py && echo "german_text_rules.py gefunden" || echo "WARNUNG: german_text_rules.py fehlt im Repo"
+          python -m pip install --upgrade pip
+          pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+          pip install --no-cache-dir qwen-tts soundfile
 
-      - name: Kokoro-Docker-Image bauen
+      - name: Textteil per Qwen3-TTS vertonen
         shell: bash
         run: |
-          cd kokoro_repo
-          docker build -f onnx-docker/Dockerfile -t kokoro-onnx-de .
-
-      - name: Kokoro-Container starten
-        id: kokoro
-        shell: bash
-        run: |
-          cd kokoro_repo
-          docker run -d --name kokoro-onnx \
-            --memory="4g" \
-            --restart=unless-stopped \
-            -p 8881:8881 \
-            -v "$(pwd)/german_text_rules.py:/app/german_text_rules.py:ro" \
-            -e KOKORO_ONNX_THREADS=2 \
-            -e KOKORO_ONNX_INTRA_OP_THREADS=2 \
-            -e KOKORO_ONNX_INTER_OP_THREADS=1 \
-            -e KOKORO_ONNX_EXECUTION_MODE=sequential \
-            -e KOKORO_ONNX_GRAPH_OPT=all \
-            -e KOKORO_ONNX_SPEED=1.0 \
-            -e KOKORO_ONNX_TRIM=true \
-            -e KOKORO_ONNX_VOICE=martin \
-            -e KOKORO_ONNX_LANG=de \
-            -e OMP_NUM_THREADS=2 \
-            -e KOKORO_PAUSE_DURATION=0.3 \
-            -e KOKORO_WORKERS=1 \
-            -e KOKORO_ONNX_ALLOW_SPINNING=0 \
-            -e KOKORO_WARMUP_TEXT="Hallo." \
-            kokoro-onnx-de
-
-          echo "Warte 10 Sekunden und prüfe Container-Status..."
-          sleep 10
-          docker ps -a
-          echo "--- Docker-Logs (erste Sekunden nach Start) ---"
-          docker logs kokoro-onnx
-
-          echo "Warte auf Kokoro-Service..."
-          BEREIT=0
-          for i in $(seq 1 40); do
-            if curl -s -o /dev/null -w "%{http_code}" http://localhost:8881/v1/audio/voices | grep -q "200"; then
-              echo "Kokoro-Service ist bereit."
-              BEREIT=1
-              break
-            fi
-            echo "Noch nicht bereit... ($i/40)"
-            sleep 5
-          done
-
-          if [ "$BEREIT" -eq 0 ]; then
-            echo "FEHLER: Kokoro-Service wurde nach 200 Sekunden nicht bereit. Vollständige Logs:"
-            docker logs kokoro-onnx
-            exit 1
-          fi
-
-      - name: Textteil per Kokoro-Docker-Service vertonen
-        shell: bash
-        run: |
-          cat > script_kokoro_synthese.py <<'PY'
+          cat > script_qwen_synthese.py <<'PY'
           import sys, time, subprocess
           from pathlib import Path
-          import requests
+          import torch
+          import soundfile as sf
+          from qwen_tts import Qwen3TTSModel
 
           TEIL_NR = "${{ matrix.teil }}"
-          BASE_URL = "http://localhost:8881"
-          STIMME = "martin"
-          INAKTIVITAETS_LIMIT_SEK = 300
+          MODEL_ID = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+          SPRECHER = "Aiden"
+          SPRACHE = "German"
 
           PARTS_DIR = Path("output/parts")
           AUDIO_DIR = Path("output/audio"); AUDIO_DIR.mkdir(parents=True, exist_ok=True)
           META = Path("output/meta")
 
+          torch.set_num_threads(4)
+
           teil_pfad = PARTS_DIR / f"teil_{TEIL_NR}.txt"
           zeilen = [z.strip() for z in teil_pfad.read_text(encoding="utf-8").split("\n") if z.strip()]
-          report = [f"Teil {TEIL_NR}: {len(zeilen)} Zeilen, Kokoro-Docker (deutsch, Stimme {STIMME})"]
+          report = [f"Teil {TEIL_NR}: {len(zeilen)} Zeilen, Qwen3-TTS 0.6B (deutsch, Sprecher {SPRECHER}, CPU)"]
           print(f"[START] Teil {TEIL_NR}: {len(zeilen)} Zeilen zu verarbeiten.", flush=True)
 
-          letzter_fortschritt = time.time()
-
-          def pruefe_inaktivitaet():
-              if time.time() - letzter_fortschritt > INAKTIVITAETS_LIMIT_SEK:
-                  print(f"[ABBRUCH-INAKTIVITAET] Kein Fortschritt seit {INAKTIVITAETS_LIMIT_SEK}s. Breche ab.", flush=True)
-                  sys.exit(1)
-
-          def container_laeuft():
-              try:
-                  r = subprocess.run(
-                      ["docker", "inspect", "-f", "{{.State.Running}}", "kokoro-onnx"],
-                      capture_output=True, text=True, timeout=10
-                  )
-                  return r.stdout.strip() == "true"
-              except Exception:
-                  return False
-
-          def container_neustarten():
-              print("[WARNUNG] Container laeuft nicht mehr. Zeige letzte Logs:", flush=True)
-              logs = subprocess.run(["docker", "logs", "--tail", "80", "kokoro-onnx"], capture_output=True, text=True)
-              print(logs.stdout[-3000:], flush=True)
-              print(logs.stderr[-3000:], flush=True)
-              subprocess.run(["docker", "start", "kokoro-onnx"], capture_output=True)
-              for i in range(20):
-                  time.sleep(3)
-                  try:
-                      r = requests.get(f"{BASE_URL}/v1/audio/voices", timeout=5)
-                      if r.status_code == 200:
-                          print("[INFO] Container erfolgreich neu gestartet.", flush=True)
-                          return True
-                  except Exception:
-                      pass
-              print("[FEHLER] Container konnte nicht neu gestartet werden.", flush=True)
-              return False
-
-          def datei_ist_gueltiges_mp3(pfad):
-              try:
-                  r = subprocess.run(
-                      ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(pfad)],
-                      capture_output=True, text=True, timeout=15
-                  )
-                  return r.returncode == 0 and r.stdout.strip() != ""
-              except Exception:
-                  return False
+          print("[INFO] Lade Qwen3-TTS-Modell (0.6B, CPU)...", flush=True)
+          t_load = time.time()
+          model = Qwen3TTSModel.from_pretrained(
+              MODEL_ID,
+              device_map="cpu",
+              torch_dtype=torch.float32,
+          )
+          print(f"[INFO] Modell geladen in {time.time() - t_load:.1f}s.", flush=True)
 
           teil_dateien = []
           for idx, zeile in enumerate(zeilen, start=1):
-              pruefe_inaktivitaet()
-              if not container_laeuft():
-                  container_neustarten()
               fehlversuche = 0
               erfolgreich = False
               while fehlversuche < 3 and not erfolgreich:
-                  if not container_laeuft():
-                      if not container_neustarten():
-                          fehlversuche = 3
-                          break
                   t0 = time.time()
                   try:
-                      resp = requests.post(
-                          f"{BASE_URL}/v1/audio/speech",
-                          json={"model": "kokoro", "input": zeile, "voice": STIMME, "response_format": "mp3"},
-                          timeout=90,
+                      wavs, sr = model.generate_custom_voice(
+                          text=zeile,
+                          language=SPRACHE,
+                          speaker=SPRECHER,
                       )
                       dauer = time.time() - t0
-                      if resp.status_code == 200 and resp.content:
-                          out_mp3 = AUDIO_DIR / f"tmp_{TEIL_NR}_{idx:05d}.mp3"
-                          out_mp3.write_bytes(resp.content)
-                          if not datei_ist_gueltiges_mp3(out_mp3):
-                              out_mp3.unlink(missing_ok=True)
-                              raise ValueError("Erhaltene Audiodatei ist kein gueltiges MP3 (ffprobe-Pruefung fehlgeschlagen)")
-                          teil_dateien.append(out_mp3)
-                          erfolgreich = True
-                          letzter_fortschritt = time.time()
-                          print(f"[OK] Teil {TEIL_NR} Zeile {idx}/{len(zeilen)} ({dauer:.1f}s)", flush=True)
-                      else:
-                          raise ValueError(f"HTTP {resp.status_code}: {resp.text[:300]}")
+                      out_wav = AUDIO_DIR / f"tmp_{TEIL_NR}_{idx:05d}.wav"
+                      sf.write(str(out_wav), wavs[0], sr)
+                      teil_dateien.append(out_wav)
+                      erfolgreich = True
+                      print(f"[OK] Teil {TEIL_NR} Zeile {idx}/{len(zeilen)} ({dauer:.1f}s)", flush=True)
                   except Exception as e:
                       fehlversuche += 1
                       report.append(f"Zeile {idx}/{len(zeilen)} Versuch {fehlversuche}/3 fehlgeschlagen: {type(e).__name__}: {e}")
                       print(f"[FEHLER] Teil {TEIL_NR} Zeile {idx} Versuch {fehlversuche}/3: {e}", flush=True)
                       if fehlversuche < 3:
-                          time.sleep(5)
+                          time.sleep(3)
               if not erfolgreich:
                   print(f"[UEBERSPRUNGEN] Teil {TEIL_NR} Zeile {idx}: alle Versuche fehlgeschlagen -> '{zeile[:60]}'", flush=True)
                   report.append(f"Zeile {idx:05d}: ALLE VERSUCHE FEHLGESCHLAGEN, uebersprungen -> {zeile[:60]}")
-                  letzter_fortschritt = time.time()
 
           if not teil_dateien:
               (META / f"qualitaet_teil_{TEIL_NR}.txt").write_text("\n".join(report) + "\n", encoding="utf-8")
@@ -588,8 +488,6 @@ jobs:
               "\n".join(f"file '{p.resolve()}'" for p in teil_dateien), encoding="utf-8"
           )
           final_mp3 = AUDIO_DIR / f"teil_{TEIL_NR}.mp3"
-          # Neu kodieren statt "-c copy", da einzelne MP3-Antworten der API
-          # inkonsistente Header haben koennen, was reines Kopieren zerstoert.
           ergebnis = subprocess.run(
               ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(liste_datei),
                "-codec:a", "libmp3lame", "-qscale:a", "2", str(final_mp3)],
@@ -607,22 +505,7 @@ jobs:
           (META / f"qualitaet_teil_{TEIL_NR}.txt").write_text("\n".join(report) + "\n", encoding="utf-8")
           print(f"[FERTIG] Teil {TEIL_NR} abgeschlossen. Erfolgreich: {len(teil_dateien)}/{len(zeilen)}", flush=True)
           PY
-          pip install --no-cache-dir requests
-          python3 -u script_kokoro_synthese.py
-
-      - name: Docker-Logs bei Fehler sichern
-        if: failure()
-        shell: bash
-        run: |
-          mkdir -p output/meta
-          docker logs kokoro-onnx > output/meta/docker_log_teil_${{ matrix.teil }}.txt 2>&1 || true
-
-      - name: Kokoro-Container stoppen
-        if: always()
-        shell: bash
-        run: |
-          docker stop kokoro-onnx || true
-          docker rm kokoro-onnx || true
+          python3 -u script_qwen_synthese.py
 
       - name: Audio-Teil als Artefakt hochladen
         uses: actions/upload-artifact@v4
@@ -636,14 +519,6 @@ jobs:
         with:
           name: qualitaet-teil-${{ matrix.teil }}
           path: output/meta/qualitaet_teil_*.txt
-          retention-days: 7
-
-      - name: Docker-Fehlerlog als Artefakt hochladen
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: docker-log-teil-${{ matrix.teil }}
-          path: output/meta/docker_log_teil_*.txt
           retention-days: 7
 
   zusammenfuegen:
@@ -691,16 +566,16 @@ jobs:
             echo "--- 1. Textextraktion ---"
             cat output/meta/01_extraktion.txt 2>/dev/null || echo "(kein Bericht vorhanden)"
             echo
-            echo "--- 2. Sprachliche Glaettung (spaCy, gelockert fuer Kokoro) ---"
+            echo "--- 2. Sprachliche Glaettung (spaCy) ---"
             cat output/meta/02_glaettung.txt 2>/dev/null || echo "(kein Bericht vorhanden)"
             echo
-            echo "--- 3. Leichte Haertung fuer Kokoro ---"
+            echo "--- 3. Leichte Haertung fuer Qwen3-TTS ---"
             cat output/meta/03_haertung.txt 2>/dev/null || echo "(kein Bericht vorhanden)"
             echo
             echo "--- 4. Aufteilung in Teile ---"
             cat output/meta/04_aufteilung.txt 2>/dev/null || echo "(kein Bericht vorhanden)"
             echo
-            echo "--- 5. Sprachsynthese (Kokoro-Docker, deutsch, CPU): Qualitaet je Teil ---"
+            echo "--- 5. Sprachsynthese (Qwen3-TTS 0.6B, deutsch, CPU): Qualitaet je Teil ---"
             for f in $(ls output/meta/qualitaet_teil_*.txt 2>/dev/null | sort); do
               echo ">>> $(basename "$f")"
               cat "$f"
@@ -724,8 +599,6 @@ jobs:
           fi
           BASE="$(pwd)"
           awk -v base="$BASE" '{print "file '\''" base "/" $0 "'\''"}' output/meta/mp3_list_raw.txt > output/meta/concat.txt
-          # Neu kodieren statt "-c copy", da die Teil-MP3s aus unterschiedlichen
-          # ffmpeg-Laeufen stammen und leicht abweichende Header haben koennen.
           ffmpeg -y -f concat -safe 0 -i output/meta/concat.txt \
             -codec:a libmp3lame -qscale:a 2 \
             -metadata comment="Erstellt von Melvin-Udall - Hoerbuecher Projekt" \
@@ -751,9 +624,8 @@ jobs:
           files: |
             release/*
           body: |
-            Automatisch erstelltes Hörbuch (Glättung: spaCy, Sprachsynthese: Kokoro-82M
-            deutsch, Stimme Martin, ueber offiziellen Docker-Service mit deutscher
-            Textnormalisierung, CPU-basiert, ohne externe GPU-Miete).
+            Automatisch erstelltes Hörbuch (Glättung: spaCy, Sprachsynthese: Qwen3-TTS
+            0.6B, deutsch, Sprecher Aiden, CPU-basiert, ohne externe GPU-Miete).
             Enthalten: Gesamt-MP3, Einzelteile als MP3, und EINE zusammengefasste
             Berichtsdatei (bericht_gesamt.txt) mit allen Verarbeitungsschritten
             und der Qualitätsprüfung jeder Zeile.
@@ -775,5 +647,5 @@ jobs:
             https://github.com/Melvin-Udall/H-rb-cher/releases/tag/hoerbuch-${{ github.run_id }}
             Enthalten: eine Gesamt-MP3, mehrere Teil-MP3s und EINE Berichtsdatei
             (bericht_gesamt.txt) mit allen Informationen zu Extraktion, Glättung (spaCy),
-            leichter Härtung, Aufteilung und Qualitätsprüfung (Synthese via Kokoro-Docker,
+            leichter Härtung, Aufteilung und Qualitätsprüfung (Synthese via Qwen3-TTS,
             deutsch, CPU, ohne GPU-Miete).
